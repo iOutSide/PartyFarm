@@ -91,6 +91,11 @@ namespace PartyFarm
             if (needRepair && !string.IsNullOrEmpty(FarmCfg.Repairman))
             {
                 State |= EFarmState.LocalRepair;
+                if (string.Compare(Me.Name, FarmCfg.Repairman, true) == 0 && NextRepairOrSellMessageAllow < DateTime.UtcNow)
+                {
+                    NextRepairOrSellMessageAllow = DateTime.UtcNow.AddSeconds(20);
+                    SendMessageToWoWCharacter(CurrentServer.Name, Me.Name, NeedRepairMessage);
+                }
                 foreach (var p in GetEntities<Player>())
                 {
                     if (string.Compare(p.Name, FarmCfg.Repairman, true) == 0 && NextRepairOrSellMessageAllow < DateTime.UtcNow)
@@ -110,12 +115,17 @@ namespace PartyFarm
             if (needSell && !string.IsNullOrEmpty(FarmCfg.Repairman))
             {
                 State |= EFarmState.LocalSell;
+                if (string.Compare(Me.Name, FarmCfg.Repairman, true) == 0 && NextRepairOrSellMessageAllow < DateTime.UtcNow)
+                {
+                    NextRepairOrSellMessageAllow = DateTime.UtcNow.AddSeconds(20);
+                    SendMessageToWoWCharacter(CurrentServer.Name, Me.Name, NeedSellMessage);
+                }
                 foreach (var p in GetEntities<Player>())
                 {
                     if (string.Compare(p.Name, FarmCfg.Repairman, true) == 0 && NextRepairOrSellMessageAllow < DateTime.UtcNow)
                     {
                         NextRepairOrSellMessageAllow = DateTime.UtcNow.AddSeconds(20);
-                        SendMessageToWoWCharacter(p.ServerName, p.Name, NeedRepairMessage);
+                        SendMessageToWoWCharacter(p.ServerName, p.Name, NeedSellMessage);
                     }
                 }
             }
@@ -139,19 +149,22 @@ namespace PartyFarm
         }
         void SellAllTrash()
         {
+            int q = 0;
             foreach (var i in ItemManager.GetItems())
             {
                 if (i.Place >= EItemPlace.InventoryBag && i.Place <= EItemPlace.Bag4)
                 {
-                    if (i.ItemQuality == EItemQuality.Poor)
+                    if ((i.ItemQuality == EItemQuality.Poor)
+                        || ((i.ItemQuality == EItemQuality.Normal || i.ItemQuality == EItemQuality.Uncommon) && (i.ItemClass == EItemClass.Armor || i.ItemClass == EItemClass.Weapon)))
                     {
+                        if (q > 10)
+                        {
+                            Thread.Sleep(1500);
+                            q = 0;
+                        }
                         i.Sell(false);
                         Thread.Sleep(RandomGen.Next(55, 112));
-                    }
-                    if ((i.ItemQuality == EItemQuality.Normal || i.ItemQuality == EItemQuality.Uncommon) && (i.ItemClass == EItemClass.Armor || i.ItemClass == EItemClass.Weapon))
-                    {
-                        i.Sell(false);
-                        Thread.Sleep(RandomGen.Next(55, 112));
+                        q++;
                     }
                 }
             }
@@ -187,6 +200,8 @@ namespace PartyFarm
 
                             if (ItemManager.RepairAllItems())
                             {
+                                if (string.Compare(Me.Name, FarmCfg.Repairman, true) == 0)
+                                    SendMessageToWoWCharacter(CurrentServer.Name, Me.Name, RepairDoneMessage);
                                 foreach (var p in GetEntities<Player>())
                                 {
                                     if (string.Compare(p.Name, FarmCfg.Repairman, true) == 0)
@@ -205,6 +220,8 @@ namespace PartyFarm
                             ComeToAndWaitStop(npcRepairman, 1f);
 
                             SellAllTrash();
+                            if (string.Compare(Me.Name, FarmCfg.Repairman, true) == 0)
+                                SendMessageToWoWCharacter(CurrentServer.Name, Me.Name, SellDoneMessage);
                             foreach (var p in GetEntities<Player>())
                             {
                                 if (string.Compare(p.Name, FarmCfg.Repairman, true) == 0)
