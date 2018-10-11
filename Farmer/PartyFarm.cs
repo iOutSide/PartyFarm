@@ -35,12 +35,13 @@ namespace PartyFarm
         string SellDoneMessage = "SellDone";
 
         EFarmState State = EFarmState.Farming;
-
+        bool IsPuller; //пулеры не нужно возвращаться в зону фарма по кд, он туда возвращается когда нечего пулить или напулил.
         bool CanWork;
         FarmConfigDefault FarmCfg;
         ClassConfig ClassCfg;
         Unit Totem;
         Unit BestMob;
+        bool BestMobInsideFZ = false;
         List<Unit> MobsCanBePulled = new List<Unit>();
         List<Unit> AggroMobsAll = new List<Unit>();
         List<Unit> AggroMobsOnParty = new List<Unit>();
@@ -173,18 +174,21 @@ namespace PartyFarm
         {
             try
             {
+                ClearLogs();
                 onCharacterMessage += PartyFarm_onCharacterMessage;
                 CanWork = true;
                 //EnableRandomJumpsOnMoves();
 
                 var cfgPath = "Configs/" + Me.Name + "_" + CurrentServer.Name + ".txt";
+                Log("Loading cfg: " + cfgPath);
                 FarmCfg = (FarmConfigDefault)ConfigLoader.LoadConfig(cfgPath, typeof(FarmConfigDefault), new FarmConfigDefault());
+                Console.WriteLine((FarmCfg == null));
+                Console.WriteLine((FarmCfg.TotemInstallZone == null));
+                Log(FarmCfg.TotemInstallZone.X + ", " + FarmCfg.TotemInstallZone.Y);
                 InitClassCfg();
                 FarmZone = new RoundZone(FarmCfg.TotemInstallZone.X, FarmCfg.TotemInstallZone.Y, FarmCfg.FarmZoneRadius);
+                IsPuller = FarmCfg.PullPolygoneZone != null || FarmCfg.PullRoundZone != null;
 
-
-
-                ClearLogs();
                 Task.Run(() => MovesTask());
 
                 while (GameState == EGameState.Ingame)
@@ -255,6 +259,8 @@ namespace PartyFarm
                             continue;
                         if (UseTotem())
                             continue;
+                        if (CheckDistToFarmZone())
+                            continue;
                         if (HealSelf())
                             continue;
                         if (HealParty())
@@ -267,8 +273,6 @@ namespace PartyFarm
                             continue;
                         if (Disenchant())
                             continue;
-                        if (CheckDistToFarmZone())
-                            continue;
                         if (UseTaunt())
                             continue;
                         TryRandomMoves();
@@ -280,6 +284,11 @@ namespace PartyFarm
                         Thread.Sleep(100);
                     }
                 }
+            }
+            catch
+            (Exception e)
+            {
+                Log(e.ToString());
             }
             finally
             {
@@ -349,7 +358,8 @@ namespace PartyFarm
                                 Location = req.Pos,
                                 Obj = req.Obj,
                                 Dist = req.dist,
-                                IgnoreStuckCheck = true
+                                UseNavCall = true,
+                                //IgnoreStuckCheck = true
                             });
                             MoveResults[req.Guid] = result ? 1 : -1;
                         }
@@ -358,7 +368,15 @@ namespace PartyFarm
                             try
                             {
                                 IsRandomMove = true;
-                                bool result = ForceMoveToWithLookTo(req.Pos, req.LookAt);
+                                // bool result = ForceMoveToWithLookTo(req.Pos, req.LookAt);
+                                bool result = MoveTo(new MoveParams()
+                                {
+                                    Location = req.Pos,
+                                    LookTo = req.LookAt,
+                                    Dist = 1f,
+                                    UseNavCall = true,
+                                    IgnoreStuckCheck = true
+                                });
                                 MoveResults[req.Guid] = result ? 1 : -1;
                             }
                             finally
@@ -601,20 +619,23 @@ namespace PartyFarm
             {
                 double angle = GetRandomNumber(0, Math.PI * 2);
                 var pos = new Vector3F(BestMob.Location.X + GetRandomNumber(6, 10) * Math.Cos(angle), BestMob.Location.Y + GetRandomNumber(6, 10) * Math.Sin(angle), Me.Location.Z);
-                var ang = Math.Atan2(BestMob.Location.Y - pos.Y, BestMob.Location.X - pos.X + 0.000001);
-                var count = CountVisibleMobs(pos, ang);
-                if (count > visibleBest)
+                if (IsInsideNavMesh(pos))
                 {
-                    visibleBest = count;
-                    best = pos;
-                    distToBest = Me.Distance(pos);
-                }
-                if (count == visibleBest)
-                {
-                    if (distToBest > Me.Distance(pos))
+                    var ang = Math.Atan2(BestMob.Location.Y - pos.Y, BestMob.Location.X - pos.X + 0.000001);
+                    var count = CountVisibleMobs(pos, ang);
+                    if (count > visibleBest)
                     {
+                        visibleBest = count;
                         best = pos;
                         distToBest = Me.Distance(pos);
+                    }
+                    if (count == visibleBest)
+                    {
+                        if (distToBest > Me.Distance(pos))
+                        {
+                            best = pos;
+                            distToBest = Me.Distance(pos);
+                        }
                     }
                 }
             }
@@ -671,7 +692,8 @@ namespace PartyFarm
             foreach (var t in GetThreats())
             {
                 AggroMobsAll.Add(t.Obj);
-                AggroMobsOnMe.Add(t.Obj);
+                if (t.Obj.Target == Me)
+                    AggroMobsOnMe.Add(t.Obj);
             }
             foreach (var mob in mobs)
             {
@@ -706,12 +728,21 @@ namespace PartyFarm
             {
                 if (FarmCfg.MobIDs.Contains(mob.Id) && mob.IsAlive
                     && !AggroMobsAll.Exists(b => b == mob) && mob.TargetGuid == WowGuid.Zero
-                    && 
-                    (       (FarmCfg.PullRoundZone != null && FarmCfg.PullRoundZone.ObjInZone(mob)) 
-                        ||  (FarmCfg.PullPolygoneZone != null && FarmCfg.PullPolygoneZone.ObjInZone(mob))
+                    &&
+                    ((FarmCfg.PullRoundZone != null && FarmCfg.PullRoundZone.ObjInZone(mob))
+                        || (FarmCfg.PullPolygoneZone != null && FarmCfg.PullPolygoneZone.ObjInZone(mob))
                     )
                     )
-                    MobsCanBePulled.Add(mob);
+                {
+                    if (GetVar(mob, "los") == null)
+                        MobsCanBePulled.Add(mob);
+                    else
+                    {
+                        var dt = (DateTime)GetVar(mob, "los");
+                        if (dt.AddSeconds(60) < DateTime.UtcNow)
+                            MobsCanBePulled.Add(mob);
+                    }
+                }
             }
             BestMob = GetBestMob();
         }
@@ -810,6 +841,7 @@ namespace PartyFarm
                 var spellCastRange = Math.Max(0, GetSpellCastRange(ClassCfg.TotemSpellId) - 1);
                 var randPoint2D = FarmCfg.TotemInstallZone.GetRandomPoint();
                 var castPoint = new Vector3F(randPoint2D.X, randPoint2D.Y, GetNavMeshHeight(randPoint2D.X, randPoint2D.Y));
+                Log("Put totem at " + castPoint);
                 if (spellCastRange != 0 && spellCastRange < Me.Distance(castPoint))
                     ComeToAndWaitStop(castPoint, Math.Max(0.5f, spellCastRange - 2));
                 if (!spellInstant && (Me.IsMoving || MoveQueue.Count > 0))
@@ -862,18 +894,51 @@ namespace PartyFarm
             }
             return false;
         }
+        bool CanContinuePull()
+        {
+            if (MobsCanBePulled.Count == 0)
+                return false;
+            if (Me.HpPercents < 70)
+                return false;
+            var d = Me.Distance2D(new Vector3F(FarmZone.X, FarmZone.Y, 0));
+            uint r = 0;
+
+            uint threatsOnMe = 0;
+            foreach (var obj in GetThreats())
+                if (obj.Obj.Target == Me)
+                    threatsOnMe++;
+
+
+            foreach (var obj in GetThreats())
+                if (obj.Obj.Distance(Me) < 10 && obj.Obj.Target == Me)
+                    r++;
+            if (r > 1 || threatsOnMe > 5)
+                return false;
+            if ((r > 0 || threatsOnMe > 3) && d > 25)
+                return false;
+            return true;
+        }
         bool CheckDistToFarmZone()
         {
-            if (NextCheckDist > DateTime.UtcNow)
+            bool forceBack = false;
+            if (IsPuller && !CanContinuePull() && Me.Distance2D(new Vector3F(FarmZone.X, FarmZone.Y, 0)) > FarmZone.Radius)
+                forceBack = true;
+            if (!forceBack && (NextCheckDist > DateTime.UtcNow || IsPuller))
                 return false;
             NextCheckDist = DateTime.UtcNow.AddSeconds(RandomGen.Next(13, 31));
             var dist = FarmZone.Radius;
             if (ClassCfg.RandomMovesType == ERandomMovesType.MidRange1 || ClassCfg.RandomMovesType == ERandomMovesType.MidRange2)
-                dist = 23;
-            if (Me.Distance2D(new Vector3F(FarmZone.X, FarmZone.Y, 0)) < dist)
+                dist = 20;
+            if (forceBack)
+                dist = 5;
+            if (FarmCfg.LogsEnabled)
+                Console.WriteLine("[CheckDistToFarmZone]: dist = " + dist + ", Distance2D: " + Me.Distance2D(new Vector3F(FarmZone.X, FarmZone.Y, 0)));
+            if (Me.Distance2D(new Vector3F(FarmZone.X, FarmZone.Y, 0)) > dist)
             {
                 var posToCome = new Vector3F(FarmZone.X, FarmZone.Y, GetNavMeshHeight(FarmZone.X, FarmZone.Y));
                 ComeToAndWaitStop(posToCome, Math.Max(0.5f, dist - RandomGen.Next(2, 5)));
+                if (FarmCfg.LogsEnabled)
+                    Console.WriteLine("[CheckDistToFarmZone] MOVE");
                 return true;
             }
             return false;
@@ -909,12 +974,14 @@ namespace PartyFarm
         Unit GetBestMob()
         {
             Unit result = null;
+            BestMobInsideFZ = false;
             double dist = double.MaxValue;
             foreach (var mob in AggroMobsInsideFarmZone)
             {
                 if (dist > Me.Distance(mob))
                 {
                     result = mob;
+                    BestMobInsideFZ = true;
                     dist = Me.Distance(mob);
                 }
             }
@@ -926,6 +993,7 @@ namespace PartyFarm
                     {
                         result = mob;
                         dist = Me.Distance(mob);
+                        BestMobInsideFZ = false;
                     }
                 }
             }
@@ -935,6 +1003,8 @@ namespace PartyFarm
         {
             if (ClassCfg.PullSpellId != 0 && MobsCanBePulled.Count > 0)
             {
+                if (!CanContinuePull())
+                    return false;
                 var mob = GetBestMobForPull();
                 if (mob == null)
                     return false;
@@ -956,7 +1026,7 @@ namespace PartyFarm
         {
             if (BestMob == null)
                 return false;
-            if (ClassCfg.PullSpellId != 0 && MobsCanBePulled.Count > 0)
+            if (ClassCfg.PullSpellId != 0 && CanContinuePull())
                 return false;
 
             foreach (var spell in ClassCfg.AttackSpellIds)
@@ -964,7 +1034,11 @@ namespace PartyFarm
                 var spellInstant = IsSpellInstant(spell.Id);
                 var spellCastRange = Math.Max(0, GetSpellCastRange(spell.Id) - 1);
                 if (spellCastRange != 0 && spellCastRange < Me.Distance(BestMob))
+                {
+                    if (!FarmCfg.ProtectPullers && !BestMobInsideFZ)
+                        return false;
                     ComeToAndWaitStop(BestMob, Math.Max(0.5f, spellCastRange - 2));
+                }
 
                 bool spellCanMoveWhileCasting = false;
                 //пока так, потом надо функцию в АПИ
@@ -999,13 +1073,17 @@ namespace PartyFarm
             }
             if (target != null && target != Me && Me.Target != target)
                 SetTarget(target);
-            //TurnIfNeed(target, false);
+            //todo, спелы которые не требуют угла, но бьют с углом
+            if (id == 120360 || id == 257044 || id == 56641)
+                TurnIfNeed(target, false);
             var crPre = SpellManager.CheckCanCast(id, target);
             if (crPre == ESpellCastError.UNIT_NOT_INFRONT)
                 TurnIfNeed(target, true);
             var cr = SpellManager.CastSpell(id, target, pos);
             if (cr == ESpellCastError.UNIT_NOT_INFRONT)
                 TurnIfNeed(target, true);
+            if (cr == ESpellCastError.LINE_OF_SIGHT)
+                SetVar(target, "los", DateTime.UtcNow);
             if (cr == ESpellCastError.SUCCESS)
             {
                 if (waitCasts)
@@ -1040,7 +1118,6 @@ namespace PartyFarm
                     Log("Failed to open loot: " + GetLastError());
                 else
                 {
-                    Console.WriteLine();
                     if (WaitTillAction(3000, new Func<bool>(() => { return CanPickupLoot(); })))
                     {
                         if (PickupLoot())

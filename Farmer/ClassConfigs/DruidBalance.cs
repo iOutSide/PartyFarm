@@ -11,7 +11,7 @@ namespace PartyFarm.ClassConfigs
     {
         internal DruidBalance()
         {
-            RandomMovesType = ERandomMovesType.MidRange1;
+            //RandomMovesType = ERandomMovesType.MidRange2;
             PullSpellId = 93402; //sunfire
             RequiredShapeshift = EShapeshiftForm.MoonkinForm;
             ShapeshiftSpellId = 24858;

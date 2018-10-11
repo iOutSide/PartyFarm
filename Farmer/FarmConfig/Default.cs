@@ -11,15 +11,18 @@ namespace PartyFarm.FarmConfig
     [Serializable]
     public class FarmConfigDefault
     {
-        public List<uint> MobIDs = new List<uint>() { 135858, 137849, 141521 };
-        public RoundZone TotemInstallZone = new RoundZone(-1828.76, -1052.18, 2);
+        public List<uint> MobIDs;
+        //public RoundZone TotemInstallZone = new RoundZone(-1828.76, -1052.18, 2);
+        public RoundZone TotemInstallZone;
         public RoundZone PullRoundZone = null;
         public PolygonZone PullPolygoneZone = null;
-        public float FarmZoneRadius = 10f;
+        public float FarmZoneRadius;
         public bool DisenchantItems = true;
         public bool DeleteTrashItems = true;
-        public string Repairman = "Monsha";
-        public Vector3F RepairSummonPoint = new Vector3F(-1826.80, -1038.84, 5.33);
-        public uint RepairmanMountSpellId = 61447;
+        public bool LogsEnabled = false;
+        public bool ProtectPullers = false; //бить мобов висящих на пати, которые вне ренжи нашей атаки?
+        public string Repairman;
+        public Vector3F RepairSummonPoint;
+        public uint RepairmanMountSpellId;
     }
 }

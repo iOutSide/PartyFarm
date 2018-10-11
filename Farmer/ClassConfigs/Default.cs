@@ -46,6 +46,7 @@ namespace PartyFarm.ClassConfigs
     }
     public enum ERandomMovesType
     {
+        None,
         Melee,
         MidRange1,
         MidRange2,
