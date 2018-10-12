@@ -203,6 +203,7 @@ namespace PartyFarm
         }
         void CommonActions()
         {
+            return;
             //в процессе бега проверяем что можно продолжать пулить
             if (MoveReason == EMoveReason.ComeToMobForPull && !CanContinuePull())
                 CancelMovesAndWaitStop();
@@ -215,7 +216,7 @@ namespace PartyFarm
                         continue;
                     var spellInstant = IsSpellInstant(spell.Id);
                     var spellCastRange = Math.Max(0, GetSpellCastRange(spell.Id) - 1);
-                    if (spellCastRange != 0 && spellCastRange < Me.Distance(BestMob))
+                    if (spellCastRange != 0 && spellCastRange > Me.Distance(BestMob))
                         continue;
                     if (UseSingleSpell(spell.Id, false, BestMob, spell.SendLocation ? BestMob.Location : new Vector3F(), false))
                         return;
@@ -1129,9 +1130,8 @@ namespace PartyFarm
                     ComeToAndWaitStop(mob, Math.Max(0.5f, spellCastRange - 2), EMoveReason.ComeToMobForPull);
                 if (!spellInstant && (Me.IsMoving || MoveQueue.Count > 0))
                     CancelMovesAndWaitStop();
-                if (spellCastRange != 0 && spellCastRange < Me.Distance(mob))
-                    if (UseSingleSpell(ClassCfg.PullSpellId, !spellInstant, mob))
-                        return true;
+                if (UseSingleSpell(ClassCfg.PullSpellId, !spellInstant, mob))
+                    return true;
             }
             return false;
             
@@ -1160,7 +1160,7 @@ namespace PartyFarm
                 {
                     spellCanMoveWhileCasting = true;
                 }
-                if (spellCastRange != 0 && spellCastRange < Me.Distance(BestMob))
+                if (spellCastRange == 0 || (spellCastRange != 0 && spellCastRange >= Me.Distance(BestMob)))
                     if (UseSingleSpell(spell.Id, !spellInstant && !spellCanMoveWhileCasting, BestMob, spell.SendLocation ? BestMob.Location : new Vector3F()))
                         return true;
             }
