@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
+using WoWBot.Core;
 
 namespace PartyFarm.ClassConfigs
 {
@@ -11,7 +12,9 @@ namespace PartyFarm.ClassConfigs
         internal HunterMarkshman()
         {
             RandomMovesType = ERandomMovesType.MidRange2;
-
+            WeaponType = new List<EItemSubclassWeapon>() { EItemSubclassWeapon.BOW, EItemSubclassWeapon.GUN };
+            ArmorType = new List<EItemSubclassArmor>() { EItemSubclassArmor.MAIL, EItemSubclassArmor.MISCELLANEOUS };
+        
             //Exhilaration
             SelfHealSpellIds.Add(new SpellCastData(109304)
             {

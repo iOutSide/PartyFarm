@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
+using WoWBot.Core;
 
 namespace PartyFarm.ClassConfigs
 {
@@ -11,6 +12,8 @@ namespace PartyFarm.ClassConfigs
         internal MonkBrewmasterClassConfig()
         {
             RandomMovesType = ERandomMovesType.Melee;
+            WeaponType = new List<EItemSubclassWeapon>() { EItemSubclassWeapon.STAFF };
+            ArmorType = new List<EItemSubclassArmor>() { EItemSubclassArmor.LEATHER, EItemSubclassArmor.MISCELLANEOUS };
             TotemSpellId = 115315;
             TauntSpellId = 115546;
 

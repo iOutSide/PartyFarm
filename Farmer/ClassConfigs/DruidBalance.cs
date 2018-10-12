@@ -12,6 +12,8 @@ namespace PartyFarm.ClassConfigs
         internal DruidBalance()
         {
             //RandomMovesType = ERandomMovesType.MidRange2;
+            WeaponType = new List<EItemSubclassWeapon>() { EItemSubclassWeapon.STAFF };
+            ArmorType = new List<EItemSubclassArmor>() { EItemSubclassArmor.LEATHER, EItemSubclassArmor.MISCELLANEOUS };
             PullSpellId = 93402; //sunfire
             RequiredShapeshift = EShapeshiftForm.MoonkinForm;
             ShapeshiftSpellId = 24858;
@@ -43,14 +45,16 @@ namespace PartyFarm.ClassConfigs
                 Conditions = new List<ConditionData> {
                     new ConditionData(EValueType.TargetInFarmZone, 0, EComparsion.Equal)
                 },
-                SendLocation = true
+                SendLocation = true,
+                IsInstaForAoeFarm = true
             });
             //Fury of elune
             AttackSpellIds.Add(new SpellCastData(202770)
             {
                 Conditions = new List<ConditionData> {
                     new ConditionData(EValueType.TargetInFarmZone, 0, EComparsion.Equal)
-                }
+                },
+                IsInstaForAoeFarm = true
             });
 
             AttackSpellIds.Add(new SpellCastData(194153));//Lunar strike

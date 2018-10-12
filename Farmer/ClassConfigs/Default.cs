@@ -38,6 +38,7 @@ namespace PartyFarm.ClassConfigs
     {
         public uint Id;
         public bool SendLocation;
+        public bool IsInstaForAoeFarm; // для пулеров, по возможности кастовать в зону фарма, если там есть мобы
         public List<ConditionData> Conditions = new List<ConditionData>();
         public SpellCastData(uint id)
         {
@@ -54,6 +55,8 @@ namespace PartyFarm.ClassConfigs
     }
     public class ClassConfig
     {
+        public List<EItemSubclassWeapon> WeaponType;
+        public List<EItemSubclassArmor> ArmorType;
         public EShapeshiftForm RequiredShapeshift;
         public uint ShapeshiftSpellId;
         public uint PullSpellId;

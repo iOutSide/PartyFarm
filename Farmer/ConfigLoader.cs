@@ -14,7 +14,6 @@ namespace PartyFarm
         {
             if (!File.Exists(path))
                 File.WriteAllText(path, JObject.FromObject(def).ToString());
-            Console.WriteLine(File.ReadAllText(path));
             var obj = JObject.Parse(File.ReadAllText(path)).ToObject(targetType);
             return obj;
         }

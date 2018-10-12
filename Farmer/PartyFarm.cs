@@ -14,6 +14,19 @@ using WoWBot.Core;
 
 namespace PartyFarm
 {
+    enum EMoveReason
+    {
+        None,
+        ComeToRepairman,
+        ComeToRepairPoint,
+        MoveToBestFarmPos,
+        PartyHeal,
+        UseTotem,
+        BackToFarmZone,
+        ComeToMobForPull,
+        ComeToMobForAttack,
+        CollectLoot
+    }
     [Flags]
     enum EFarmState
     {
@@ -22,7 +35,8 @@ namespace PartyFarm
         LocalSell = 4,
         GlobalAuction = 8,
         DefOrRegroup = 16,
-        NeedCallRepairman = 32
+        NeedCallRepairman = 32,
+        LocalEquip = 64,
     }
     public class PartyFarm : Core
     {
@@ -34,6 +48,7 @@ namespace PartyFarm
         string NeedSellMessage = "NeedSell";
         string SellDoneMessage = "SellDone";
 
+        EMoveReason MoveReason = EMoveReason.None;
         EFarmState State = EFarmState.Farming;
         bool IsPuller; //пулеры не нужно возвращаться в зону фарма по кд, он туда возвращается когда нечего пулить или напулил.
         bool CanWork;
@@ -132,6 +147,17 @@ namespace PartyFarm
             }
             else
                 State &= ~EFarmState.LocalSell;
+
+
+            var toEquip = EquipBestArmorAndWeapon();
+            bool needEquip = toEquip != null && toEquip.Count > 0;
+            if (FarmCfg.LogsEnabled && needEquip)
+                foreach (var e in toEquip)
+                    Console.WriteLine("CAN EQUIP: " + e.Name + "[" + e.Level + "]");
+            if (needEquip)
+                State |= EFarmState.LocalEquip;
+            else
+                State &= ~EFarmState.LocalEquip;
         }
         Dictionary<string, DateTime> RepairRequests = new Dictionary<string, DateTime>();
         Dictionary<string, DateTime> SellRequests = new Dictionary<string, DateTime>();
@@ -147,6 +173,10 @@ namespace PartyFarm
                 SellRequests[SenderName + "-" + SenderServerName] = DateTime.UtcNow.AddMinutes(1);
                 State |= EFarmState.NeedCallRepairman;
             }
+            if (Message == RepairDoneMessage)
+                RepairRequests[SenderName + "-" + SenderServerName] = DateTime.UtcNow;
+            if (Message == SellDoneMessage)
+                RepairRequests[SenderName + "-" + SenderServerName] = DateTime.UtcNow;
         }
         void SellAllTrash()
         {
@@ -160,13 +190,35 @@ namespace PartyFarm
                     {
                         if (q > 10)
                         {
-                            Thread.Sleep(1500);
+                            Thread.Sleep(2500);
                             q = 0;
                         }
-                        i.Sell(false);
-                        Thread.Sleep(RandomGen.Next(55, 112));
+                        var x = i.Sell(false);
+                        Log("Try to sell " + i.Name + " with result: " + x + "[" + GetLastError() + "]", Me.Name);
+                        Thread.Sleep(RandomGen.Next(155, 252));
                         q++;
                     }
+                }
+            }
+        }
+        void CommonActions()
+        {
+            //в процессе бега проверяем что можно продолжать пулить
+            if (MoveReason == EMoveReason.ComeToMobForPull && !CanContinuePull())
+                CancelMovesAndWaitStop();
+            
+            if (BestMob != null)
+            {
+                foreach (var spell in ClassCfg.AttackSpellIds)
+                {
+                    if (!spell.IsInstaForAoeFarm)
+                        continue;
+                    var spellInstant = IsSpellInstant(spell.Id);
+                    var spellCastRange = Math.Max(0, GetSpellCastRange(spell.Id) - 1);
+                    if (spellCastRange != 0 && spellCastRange < Me.Distance(BestMob))
+                        continue;
+                    if (UseSingleSpell(spell.Id, false, BestMob, spell.SendLocation ? BestMob.Location : new Vector3F(), false))
+                        return;
                 }
             }
         }
@@ -174,17 +226,19 @@ namespace PartyFarm
         {
             try
             {
+                while (GameState != EGameState.Ingame)
+                    Thread.Sleep(1000);
                 ClearLogs();
+                onMoveTick += PartyFarm_onMoveTick;
                 onCharacterMessage += PartyFarm_onCharacterMessage;
                 CanWork = true;
                 //EnableRandomJumpsOnMoves();
 
                 var cfgPath = "Configs/" + Me.Name + "_" + CurrentServer.Name + ".txt";
-                Log("Loading cfg: " + cfgPath);
+                Log("Loading cfg: " + cfgPath, Me.Name);
                 FarmCfg = (FarmConfigDefault)ConfigLoader.LoadConfig(cfgPath, typeof(FarmConfigDefault), new FarmConfigDefault());
-                Console.WriteLine((FarmCfg == null));
-                Console.WriteLine((FarmCfg.TotemInstallZone == null));
-                Log(FarmCfg.TotemInstallZone.X + ", " + FarmCfg.TotemInstallZone.Y);
+                ConfigLoader.SaveConfig(cfgPath, FarmCfg);
+                Log(FarmCfg.TotemInstallZone.X + ", " + FarmCfg.TotemInstallZone.Y, Me.Name);
                 InitClassCfg();
                 FarmZone = new RoundZone(FarmCfg.TotemInstallZone.X, FarmCfg.TotemInstallZone.Y, FarmCfg.FarmZoneRadius);
                 IsPuller = FarmCfg.PullPolygoneZone != null || FarmCfg.PullRoundZone != null;
@@ -200,7 +254,7 @@ namespace PartyFarm
                         if (npcRepairman != null)
                         {
                             NextRepairOrSellAllow = DateTime.UtcNow.AddSeconds(30);
-                            ComeToAndWaitStop(npcRepairman, 1f);
+                            ComeToAndWaitStop(npcRepairman, 1f, EMoveReason.ComeToRepairman);
 
                             if (ItemManager.RepairAllItems())
                             {
@@ -215,13 +269,14 @@ namespace PartyFarm
                             }
                         }
                     }
+
                     if ((State & EFarmState.LocalSell) != 0 && NextRepairOrSellAllow < DateTime.UtcNow)
                     {
-                        Unit npcRepairman = GetEntities<Unit>().FirstOrDefault(npc => npc.IsVendor && npc.IsArmorer);
+                        Unit npcRepairman = GetEntities<Unit>().FirstOrDefault(npc => npc.IsVendor);
                         if (npcRepairman != null)
                         {
                             NextRepairOrSellAllow = DateTime.UtcNow.AddSeconds(30);
-                            ComeToAndWaitStop(npcRepairman, 1f);
+                            ComeToAndWaitStop(npcRepairman, 1f, EMoveReason.ComeToRepairman);
 
                             SellAllTrash();
                             if (string.Compare(Me.Name, FarmCfg.Repairman, true) == 0)
@@ -238,10 +293,31 @@ namespace PartyFarm
                     if ((State & EFarmState.NeedCallRepairman) != 0 && FarmCfg.RepairmanMountSpellId != 0)
                     {
                         if (FarmCfg.RepairSummonPoint != Vector3F.Zero && Me.Distance(FarmCfg.RepairSummonPoint) > 3)
-                            ComeToAndWaitStop(FarmCfg.RepairSummonPoint, 1);
+                            ComeToAndWaitStop(FarmCfg.RepairSummonPoint, 1, EMoveReason.ComeToRepairPoint);
                         Unit npcRepairman = GetEntities<Unit>().FirstOrDefault(npc => npc.IsVendor && npc.IsArmorer);
                         if (!Me.IsInCombat && npcRepairman == null)
                             SpellManager.CastSpell(FarmCfg.RepairmanMountSpellId);
+                        Thread.Sleep(1000);
+                    }
+                    else if ((State & EFarmState.LocalEquip) != 0)
+                    {
+                        if (FarmCfg.RepairSummonPoint != Vector3F.Zero && Me.Distance(FarmCfg.RepairSummonPoint) > 3)
+                            ComeToAndWaitStop(FarmCfg.RepairSummonPoint, 1, EMoveReason.ComeToRepairPoint);
+                        if (!Me.IsInCombat)
+                        {
+                            var toEquip = EquipBestArmorAndWeapon();
+                            if (toEquip != null)
+                            {
+                                foreach (var item in toEquip)
+                                {
+                                    if (item.Equip())
+                                    {
+                                        Log("Одеваю [" + item.InventoryType + "] " + item.Name, Me.Name);
+                                        Thread.Sleep(RandomGen.Next(555, 1555));
+                                    }
+                                }
+                            }
+                        }
                         Thread.Sleep(1000);
                     }
                     else if ((State & EFarmState.Farming) != 0)
@@ -255,6 +331,7 @@ namespace PartyFarm
                         WaitCasts();
                         SetupVariables();
                         DeteleTrashItems();
+                        CommonActions(); //вещи, которые можно сделать моментально или в процессе бега
                         if (CheckShapeshift())
                             continue;
                         if (UseTotem())
@@ -297,8 +374,13 @@ namespace PartyFarm
             }
         }
 
-        
-
+        private void PartyFarm_onMoveTick(Vector3F loc)
+        {
+            if (GameState == EGameState.Ingame)
+            {
+                CommonActions();
+            }
+        }
         void DeteleTrashItems()
         {
             if (!FarmCfg.DeleteTrashItems)
@@ -327,6 +409,7 @@ namespace PartyFarm
         }
         class MoveRequest
         {
+            public EMoveReason Reason;
             public Guid Guid;
             public Vector3F Pos;
             public Vector3F LookAt;
@@ -352,35 +435,44 @@ namespace PartyFarm
                         MoveRequest req;
                         if (!MoveQueue.TryDequeue(out req))
                             continue;
-                        if (req.Type == EMoveCallCmdType.ComeTo)
+                        try
                         {
-                            bool result = MoveTo(new MoveParams() {
-                                Location = req.Pos,
-                                Obj = req.Obj,
-                                Dist = req.dist,
-                                UseNavCall = true,
-                                //IgnoreStuckCheck = true
-                            });
-                            MoveResults[req.Guid] = result ? 1 : -1;
-                        }
-                        else if (req.Type == EMoveCallCmdType.MoveWithLookAt)
-                        {
-                            try
+                            MoveReason = req.Reason;
+                            if (req.Type == EMoveCallCmdType.ComeTo)
                             {
-                                IsRandomMove = true;
-                                // bool result = ForceMoveToWithLookTo(req.Pos, req.LookAt);
                                 bool result = MoveTo(new MoveParams()
                                 {
                                     Location = req.Pos,
-                                    LookTo = req.LookAt,
-                                    Dist = 1f,
+                                    Obj = req.Obj,
+                                    Dist = req.dist,
                                     UseNavCall = true,
-                                    IgnoreStuckCheck = true
+                                    //IgnoreStuckCheck = true
                                 });
                                 MoveResults[req.Guid] = result ? 1 : -1;
                             }
-                            finally
-                            { IsRandomMove = false; }
+                            else if (req.Type == EMoveCallCmdType.MoveWithLookAt)
+                            {
+                                try
+                                {
+                                    IsRandomMove = true;
+                                    // bool result = ForceMoveToWithLookTo(req.Pos, req.LookAt);
+                                    bool result = MoveTo(new MoveParams()
+                                    {
+                                        Location = req.Pos,
+                                        LookTo = req.LookAt,
+                                        Dist = 1f,
+                                        UseNavCall = true,
+                                        IgnoreStuckCheck = true
+                                    });
+                                    MoveResults[req.Guid] = result ? 1 : -1;
+                                }
+                                finally
+                                { IsRandomMove = false; }
+                            }
+                        }
+                        finally
+                        {
+                            MoveReason = EMoveReason.None;
                         }
                     }
                     else
@@ -403,7 +495,7 @@ namespace PartyFarm
                 Thread.Sleep(50);
             return result;
         }
-        void MoveToWithLookAtNoWait(Vector3F pos, Vector3F lookAt)
+        void MoveToWithLookAtNoWait(Vector3F pos, Vector3F lookAt, EMoveReason reason)
         {
             var guid = Guid.NewGuid();
             MoveResults[guid] = 0;
@@ -413,9 +505,10 @@ namespace PartyFarm
             req.Pos = pos;
             req.Guid = guid;
             req.LookAt = lookAt;
+            req.Reason = reason;
             MoveQueue.Enqueue(req);
         }
-        bool ComeToAndWaitStop(Vector3F pos, double dist)
+        bool ComeToAndWaitStop(Vector3F pos, double dist, EMoveReason reason)
         {
             var guid = Guid.NewGuid();
             MoveResults[guid] = 0;
@@ -425,6 +518,7 @@ namespace PartyFarm
             req.Pos = pos;
             req.Guid = guid;
             req.dist = dist;
+            req.Reason = reason;
             MoveQueue.Enqueue(req);
 
             while (MoveResults[guid] == 0)
@@ -436,7 +530,7 @@ namespace PartyFarm
                 Thread.Sleep(5);
             return result;
         }
-        bool ComeToAndWaitStop(Entity obj, double dist)
+        bool ComeToAndWaitStop(Entity obj, double dist, EMoveReason reason)
         {
             var guid = Guid.NewGuid();
             MoveResults[guid] = 0;
@@ -446,6 +540,7 @@ namespace PartyFarm
             req.Obj = obj;
             req.Guid = guid;
             req.dist = dist;
+            req.Reason = reason;
             MoveQueue.Enqueue(req);
 
             while (MoveResults[guid] == 0)
@@ -642,8 +737,8 @@ namespace PartyFarm
 
             if (best != Vector3F.Zero)
             {
-                //MoveToWithLookAtNoWait(best, BestMob.Location);
-                ForceMoveToWithLookTo(best, BestMob.Location);
+                MoveToWithLookAtNoWait(best, BestMob.Location, EMoveReason.MoveToBestFarmPos);
+                //ForceMoveToWithLookTo(best, BestMob.Location);
             }
         }
         void InitClassCfg()
@@ -658,7 +753,7 @@ namespace PartyFarm
                 ClassCfg = new HunterMarkshman();
             else
             {
-                Log("Unknown ClassSpec: " + Me.Class + "[" + Me.TalentSpecId + "]");
+                Log("Unknown ClassSpec: " + Me.Class + "[" + Me.TalentSpecId + "]", Me.Name);
                 ClassCfg = new ClassConfig();
             }
         }
@@ -762,7 +857,7 @@ namespace PartyFarm
                             var spellCastRange = Math.Max(0, GetSpellCastRange(spellData.Id) - 1);
                             if (spellCastRange != 0 && spellCastRange < Me.Distance(p))
                             {
-                                ComeToAndWaitStop(p, Math.Max(0.5f, spellCastRange - 2));
+                                ComeToAndWaitStop(p, Math.Max(0.5f, spellCastRange - 2), EMoveReason.PartyHeal);
                             }
                             if (UseSingleSpell(spellData.Id, !spellInstant, p))
                                 return true;
@@ -841,14 +936,19 @@ namespace PartyFarm
                 var spellCastRange = Math.Max(0, GetSpellCastRange(ClassCfg.TotemSpellId) - 1);
                 var randPoint2D = FarmCfg.TotemInstallZone.GetRandomPoint();
                 var castPoint = new Vector3F(randPoint2D.X, randPoint2D.Y, GetNavMeshHeight(randPoint2D.X, randPoint2D.Y));
-                Log("Put totem at " + castPoint);
+                Log("Put totem at " + castPoint, Me.Name);
                 if (spellCastRange != 0 && spellCastRange < Me.Distance(castPoint))
-                    ComeToAndWaitStop(castPoint, Math.Max(0.5f, spellCastRange - 2));
+                {
+                    Log("Come for this", Me.Name);
+                    ComeToAndWaitStop(castPoint, Math.Max(0.5f, spellCastRange - 2), EMoveReason.UseTotem);
+                }
                 if (!spellInstant && (Me.IsMoving || MoveQueue.Count > 0))
                 {
+                    Log("Stop movements", Me.Name);
                     CancelMovesAndWaitStop();
                 }
                 var result = SpellManager.CastSpell(ClassCfg.TotemSpellId, null, castPoint);
+                Log("result = " + result, Me.Name);
                 return result == ESpellCastError.SUCCESS;
             }
             return false;
@@ -900,6 +1000,9 @@ namespace PartyFarm
                 return false;
             if (Me.HpPercents < 70)
                 return false;
+            //увеличить при необходимости
+            if (AggroMobsInsideFarmZone.Count > FarmCfg.DontPullWhenXMobsInFarmZone)
+                return false;
             var d = Me.Distance2D(new Vector3F(FarmZone.X, FarmZone.Y, 0));
             uint r = 0;
 
@@ -912,10 +1015,25 @@ namespace PartyFarm
             foreach (var obj in GetThreats())
                 if (obj.Obj.Distance(Me) < 10 && obj.Obj.Target == Me)
                     r++;
-            if (r > 1 || threatsOnMe > 5)
-                return false;
-            if ((r > 0 || threatsOnMe > 3) && d > 25)
-                return false;
+            if (FarmCfg.PullСomplexity == EPullСomplexity.Max)
+            {
+                if (r > 1 || threatsOnMe > 5)
+                    return false;
+                if ((r > 0 || threatsOnMe > 3) && d > 25)
+                    return false;
+            }
+            if (FarmCfg.PullСomplexity == EPullСomplexity.Mid)
+            {
+                if (r > 1 || threatsOnMe > 3)
+                    return false;
+                if ((r > 0 || threatsOnMe > 1) && d > 25)
+                    return false;
+            }
+            if (FarmCfg.PullСomplexity == EPullСomplexity.Safe)
+            {
+                if (r > 0 || threatsOnMe > 2)
+                    return false;
+            }
             return true;
         }
         bool CheckDistToFarmZone()
@@ -931,14 +1049,11 @@ namespace PartyFarm
                 dist = 20;
             if (forceBack)
                 dist = 5;
-            if (FarmCfg.LogsEnabled)
-                Console.WriteLine("[CheckDistToFarmZone]: dist = " + dist + ", Distance2D: " + Me.Distance2D(new Vector3F(FarmZone.X, FarmZone.Y, 0)));
+
             if (Me.Distance2D(new Vector3F(FarmZone.X, FarmZone.Y, 0)) > dist)
             {
                 var posToCome = new Vector3F(FarmZone.X, FarmZone.Y, GetNavMeshHeight(FarmZone.X, FarmZone.Y));
-                ComeToAndWaitStop(posToCome, Math.Max(0.5f, dist - RandomGen.Next(2, 5)));
-                if (FarmCfg.LogsEnabled)
-                    Console.WriteLine("[CheckDistToFarmZone] MOVE");
+                ComeToAndWaitStop(posToCome, Math.Max(0.5f, dist - RandomGen.Next(2, 5)), EMoveReason.BackToFarmZone);
                 return true;
             }
             return false;
@@ -1011,13 +1126,12 @@ namespace PartyFarm
                 var spellInstant = IsSpellInstant(ClassCfg.PullSpellId);
                 var spellCastRange = Math.Max(0, GetSpellCastRange(ClassCfg.PullSpellId) - 1);
                 if (spellCastRange != 0 && spellCastRange < Me.Distance(mob))
-                    ComeToAndWaitStop(mob, Math.Max(0.5f, spellCastRange - 2));
+                    ComeToAndWaitStop(mob, Math.Max(0.5f, spellCastRange - 2), EMoveReason.ComeToMobForPull);
                 if (!spellInstant && (Me.IsMoving || MoveQueue.Count > 0))
-                {
                     CancelMovesAndWaitStop();
-                }
-                if (UseSingleSpell(ClassCfg.PullSpellId, !spellInstant, mob))
-                    return true;
+                if (spellCastRange != 0 && spellCastRange < Me.Distance(mob))
+                    if (UseSingleSpell(ClassCfg.PullSpellId, !spellInstant, mob))
+                        return true;
             }
             return false;
             
@@ -1036,8 +1150,8 @@ namespace PartyFarm
                 if (spellCastRange != 0 && spellCastRange < Me.Distance(BestMob))
                 {
                     if (!FarmCfg.ProtectPullers && !BestMobInsideFZ)
-                        return false;
-                    ComeToAndWaitStop(BestMob, Math.Max(0.5f, spellCastRange - 2));
+                        continue;
+                    ComeToAndWaitStop(BestMob, Math.Max(0.5f, spellCastRange - 2), EMoveReason.ComeToMobForAttack);
                 }
 
                 bool spellCanMoveWhileCasting = false;
@@ -1046,8 +1160,9 @@ namespace PartyFarm
                 {
                     spellCanMoveWhileCasting = true;
                 }
-                if (UseSingleSpell(spell.Id, !spellInstant && !spellCanMoveWhileCasting, BestMob, spell.SendLocation ? BestMob.Location : new Vector3F()))
-                    return true;
+                if (spellCastRange != 0 && spellCastRange < Me.Distance(BestMob))
+                    if (UseSingleSpell(spell.Id, !spellInstant && !spellCanMoveWhileCasting, BestMob, spell.SendLocation ? BestMob.Location : new Vector3F()))
+                        return true;
             }
             return false;
         }
@@ -1065,22 +1180,20 @@ namespace PartyFarm
             while (SpellManager.IsCasting || SpellManager.IsChanneling)
                 Thread.Sleep(100);
         }
-        bool UseSingleSpell(uint id, bool waitCasts, Unit target = null, Vector3F pos = new Vector3F())
+        bool UseSingleSpell(uint id, bool waitCasts, Unit target = null, Vector3F pos = new Vector3F(), bool autoTurn = true)
         {
             if (waitCasts && (Me.IsMoving || MoveQueue.Count > 0))
-            {
                 CancelMovesAndWaitStop();
-            }
             if (target != null && target != Me && Me.Target != target)
                 SetTarget(target);
             //todo, спелы которые не требуют угла, но бьют с углом
-            if (id == 120360 || id == 257044 || id == 56641)
+            if (autoTurn && (id == 120360 || id == 257044 || id == 56641))
                 TurnIfNeed(target, false);
             var crPre = SpellManager.CheckCanCast(id, target);
-            if (crPre == ESpellCastError.UNIT_NOT_INFRONT)
+            if (autoTurn && crPre == ESpellCastError.UNIT_NOT_INFRONT)
                 TurnIfNeed(target, true);
             var cr = SpellManager.CastSpell(id, target, pos);
-            if (cr == ESpellCastError.UNIT_NOT_INFRONT)
+            if (autoTurn && cr == ESpellCastError.UNIT_NOT_INFRONT)
                 TurnIfNeed(target, true);
             if (cr == ESpellCastError.LINE_OF_SIGHT)
                 SetVar(target, "los", DateTime.UtcNow);
@@ -1111,11 +1224,11 @@ namespace PartyFarm
                 var maxRange = MaxInteractionDistance - 1f;
                 if (Me.Distance(first) > maxRange)
                 {
-                    ComeToAndWaitStop(first, maxRange);
+                    ComeToAndWaitStop(first, maxRange, EMoveReason.CollectLoot);
                     Thread.Sleep(111);
                 }
                 if (!OpenLoot(first))
-                    Log("Failed to open loot: " + GetLastError());
+                    Log("Failed to open loot: " + GetLastError(), Me.Name);
                 else
                 {
                     if (WaitTillAction(3000, new Func<bool>(() => { return CanPickupLoot(); })))
@@ -1138,12 +1251,15 @@ namespace PartyFarm
             if (NextDisenchant > DateTime.UtcNow)
                 return false;
             NextDisenchant = DateTime.UtcNow.AddSeconds(RandomGen.Next(2, 10));
+            var toEquip = EquipBestArmorAndWeapon();
             foreach (var item in ItemManager.GetItems())
             {
                 if (item.Place >= EItemPlace.InventoryItem && item.Place <= EItemPlace.Bag4)
                 {
                     if (item.ItemQuality == EItemQuality.Uncommon)
                     {
+                        if (toEquip != null && toEquip.Contains(item))
+                            continue;
                         if (Me.IsMoving || MoveQueue.Count > 0)
                         {
                             CancelMovesAndWaitStop();
@@ -1202,10 +1318,126 @@ namespace PartyFarm
             }
             return false;
         }
-        
+
+        List<Item> EquipBestArmorAndWeapon()
+        {
+            if (!FarmCfg.AutoEquipItems)
+                return null;
+            var result = new List<Item>();
+            var equipCells = new Dictionary<EEquipmentSlot, Item>();
+            foreach (EEquipmentSlot value in Enum.GetValues(typeof(EEquipmentSlot)))
+                equipCells.Add(value, null);
+
+            foreach (var item in ItemManager.GetItems())
+            {
+                if (item.Place == EItemPlace.Bag1 || item.Place == EItemPlace.Bag2 ||
+                    item.Place == EItemPlace.Bag3 || item.Place == EItemPlace.Bag4 ||
+                    item.Place == EItemPlace.InventoryItem || item.Place == EItemPlace.Equipment)
+                {
+                    if (item.ItemClass == EItemClass.Armor || item.ItemClass == EItemClass.Weapon)
+                    {
+                        if (item.Place != EItemPlace.Equipment && !item.CanEquipItem())
+                            continue;
+                        if (item.RequiredLevel > Me.Level)
+                            continue;
+                        if (item.ItemClass == EItemClass.Weapon && !ClassCfg.WeaponType.Contains((EItemSubclassWeapon)item.ItemSubClass))
+                            continue;
+                        if (item.ItemClass == EItemClass.Armor && !ClassCfg.ArmorType.Contains((EItemSubclassArmor)item.ItemSubClass))
+                            continue;
+
+                        var itemEquipType = GetItemEPlayerPartsType(item.InventoryType);
+                        //одноручные пухи тут проверка
+                        if (itemEquipType == EEquipmentSlot.OffHand)
+                            continue;
+
+                        if (equipCells[itemEquipType] == null)
+                            equipCells[itemEquipType] = item;
+                        else
+                        {
+                            double bestCoef = 0;
+                            double curCoef = 0;
+                            bestCoef = equipCells[itemEquipType].Level;
+                            curCoef = item.Level;
+                            if (bestCoef < curCoef)
+                                equipCells[itemEquipType] = item;
+                        }
+                    }
+                }
+            }
+            foreach (var b in equipCells.Keys.ToList())
+            {
+                if (equipCells[b] != null && equipCells[b].Place != EItemPlace.Equipment)
+                    result.Add(equipCells[b]);
+            }
+
+            return result;
+        }
+        EEquipmentSlot GetItemEPlayerPartsType(EInventoryType type)
+        {
+            switch (type)
+            {
+                /*  case EInventoryType.NonEquip:
+                      break;*/
+                case EInventoryType.Head:
+                    return EEquipmentSlot.Head;
+                case EInventoryType.Neck:
+                    return EEquipmentSlot.Neck;
+                case EInventoryType.Shoulders:
+                    return EEquipmentSlot.Shoulders;
+                case EInventoryType.Body:
+                    return EEquipmentSlot.Body;
+                case EInventoryType.Chest:
+                    return EEquipmentSlot.Chest;
+                case EInventoryType.Waist:
+                    return EEquipmentSlot.Waist;
+                case EInventoryType.Legs:
+                    return EEquipmentSlot.Legs;
+                case EInventoryType.Feet:
+                    return EEquipmentSlot.Feet;
+                case EInventoryType.Wrists:
+                    return EEquipmentSlot.Wrists;
+                case EInventoryType.Hands:
+                    return EEquipmentSlot.Hands;
+                case EInventoryType.Finger:
+                    return EEquipmentSlot.Finger1;
+                case EInventoryType.Trinket:
+                    return EEquipmentSlot.Trinket1;
+                case EInventoryType.Weapon:
+                    return EEquipmentSlot.MainHand;
+                case EInventoryType.Shield:
+                    return EEquipmentSlot.OffHand;
+
+                case EInventoryType.Ranged:
+                    return EEquipmentSlot.MainHand;
+                case EInventoryType.Cloak:
+                    return EEquipmentSlot.Cloak;
+                case EInventoryType.TwoHandedWeapon:
+                    return EEquipmentSlot.MainHand;
+                case EInventoryType.Bag:
+                    break;
+                case EInventoryType.Tabard:
+                    return EEquipmentSlot.Tabard;
+                case EInventoryType.Robe:
+                    return EEquipmentSlot.Chest;
+                case EInventoryType.MainHandWeapon:
+                    return EEquipmentSlot.MainHand;
+                case EInventoryType.OffHandWeapon:
+                    return EEquipmentSlot.OffHand;
+                case EInventoryType.Holdable:
+                    return EEquipmentSlot.OffHand;
+                case EInventoryType.RangedRight:
+                    return EEquipmentSlot.MainHand;
+            }
+            return EEquipmentSlot.Ranged;
+        }
+
         public void PluginStop()
         {
+            CanWork = false;
+            MoveQueue = new ConcurrentQueue<MoveRequest>();
+
             //DisableRandomJumpsOnMoves();
+            CancelMoveTo();
             MoveForward(false);
             MoveBackward(false);
             StrafeRight(false);
@@ -1213,7 +1445,6 @@ namespace PartyFarm
             Ascend(false);
             Descend(false);
             SetMoveStateForClient(false);
-            CanWork = false;
         }
     }
 }
