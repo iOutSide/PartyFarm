@@ -59,6 +59,7 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="ClassConfigs\Default.cs" />
+    <Compile Include="ClassConfigs\MageFrost.cs" />
     <Compile Include="ClassConfigs\DruidBalance.cs" />
     <Compile Include="ClassConfigs\MonkBrewmaster.cs" />
     <Compile Include="ClassConfigs\HunterMarkshman.cs" />

@@ -17,7 +17,7 @@ namespace PartyFarm.FarmConfig
     [Serializable]
     public class FarmConfigDefault
     {
-        public List<uint> MobIDs;
+        public Dictionary<uint, uint> MobIDs;
         //public RoundZone TotemInstallZone = new RoundZone(-1828.76, -1052.18, 2);
         public RoundZone TotemInstallZone;
         public EPullСomplexity PullСomplexity;

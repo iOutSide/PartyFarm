@@ -11,6 +11,8 @@ namespace PartyFarm.ClassConfigs
     {
         internal HunterMarkshman()
         {
+            PullSpellId = 5116;
+            SpellcastPreventSpellId = 147362;
             RandomMovesType = ERandomMovesType.MidRange2;
             WeaponType = new List<EItemSubclassWeapon>() { EItemSubclassWeapon.BOW, EItemSubclassWeapon.GUN };
             ArmorType = new List<EItemSubclassArmor>() { EItemSubclassArmor.MAIL, EItemSubclassArmor.MISCELLANEOUS };

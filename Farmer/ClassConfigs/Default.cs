@@ -21,13 +21,22 @@ namespace PartyFarm.ClassConfigs
         HpPercent,
         TargetInFarmZone,
         MonkStagger,
+        CreaturesCount,
+        MinionExists,
     }
     public class ConditionData
     {
         public EValueType Type;
         public int Value;
+        public int Value2;
         public EComparsion Comparsion;
         public ConditionData(EValueType type, int value, EComparsion comparsion)
+        {
+            Type = type;
+            Value = value;
+            Comparsion = comparsion;
+        }
+        public ConditionData(EValueType type, int value, int value2, EComparsion comparsion)
         {
             Type = type;
             Value = value;
@@ -62,6 +71,7 @@ namespace PartyFarm.ClassConfigs
         public uint PullSpellId;
         public uint TauntSpellId;
         public uint TotemSpellId;
+        public uint SpellcastPreventSpellId;
         public List<SpellCastData> SelfHealSpellIds = new List<SpellCastData>();
         public List<SpellCastData> PartyHealSpellIds = new List<SpellCastData>();
         public List<SpellCastData> BuffSpellIds = new List<SpellCastData>();

@@ -48,6 +48,7 @@ namespace PartyFarm
         string NeedSellMessage = "NeedSell";
         string SellDoneMessage = "SellDone";
 
+        double PullSpellRange = 30f;
         EMoveReason MoveReason = EMoveReason.None;
         EFarmState State = EFarmState.Farming;
         bool IsPuller; //пулеры не нужно возвращаться в зону фарма по кд, он туда возвращается когда нечего пулить или напулил.
@@ -174,9 +175,9 @@ namespace PartyFarm
                 State |= EFarmState.NeedCallRepairman;
             }
             if (Message == RepairDoneMessage)
-                RepairRequests[SenderName + "-" + SenderServerName] = DateTime.UtcNow;
+                RepairRequests[SenderName + "-" + SenderServerName] = DateTime.MinValue;
             if (Message == SellDoneMessage)
-                RepairRequests[SenderName + "-" + SenderServerName] = DateTime.UtcNow;
+                SellRequests[SenderName + "-" + SenderServerName] = DateTime.MinValue;
         }
         void SellAllTrash()
         {
@@ -201,13 +202,67 @@ namespace PartyFarm
                 }
             }
         }
+
+        List<Unit> AggroMobsAll2 = new List<Unit>();
+        List<Unit> MobsCanBePulled2 = new List<Unit>();
         void CommonActions()
         {
-            return;
             //в процессе бега проверяем что можно продолжать пулить
             if (MoveReason == EMoveReason.ComeToMobForPull && !CanContinuePull())
                 CancelMovesAndWaitStop();
-            
+
+            if (MoveReason == EMoveReason.ComeToMobForPull || MoveReason == EMoveReason.BackToFarmZone)
+            {
+                //пока бежим - проверяем может кого то еще запулить можем
+                if (ClassCfg.PullSpellId != 0)
+                {
+                    AggroMobsAll2.Clear();
+                    MobsCanBePulled2.Clear();
+                    foreach (var t in GetThreats())
+                        AggroMobsAll2.Add(t.Obj);
+                    foreach (var mob in GetEntities<Unit>())
+                    {
+                        if (FarmCfg.MobIDs.ContainsKey(mob.Id))
+                        {
+                            if (mob.IsAlive)
+                            {
+                                if (Totem != null && mob.Target == Totem)
+                                    AggroMobsAll2.Add(mob);
+                                foreach (var p in GroupPlayers)
+                                {
+                                    if (mob.Target == p)
+                                        AggroMobsAll2.Add(mob);
+                                }
+                            }
+                        }
+                    }
+                    foreach (var mob in GetEntities<Unit>())
+                    {
+                        if (FarmCfg.MobIDs.ContainsKey(mob.Id) && mob.IsAlive
+                            && !AggroMobsAll.Exists(b => b == mob) && mob.TargetGuid == WowGuid.Zero
+                            && ClassCfg.PullSpellId != 0 && mob.Distance(Me) < PullSpellRange)
+                        {
+                            if (GetVar(mob, "los") == null)
+                                MobsCanBePulled2.Add(mob);
+                            else
+                            {
+                                var dt = (DateTime)GetVar(mob, "los");
+                                if (dt.AddSeconds(60) < DateTime.UtcNow)
+                                    MobsCanBePulled2.Add(mob);
+                            }
+                        }
+                    }
+                    foreach (var mob in MobsCanBePulled2)
+                    {
+                        if (PullSpellRange == 0 || (PullSpellRange != 0 && PullSpellRange > Me.Distance(mob)))
+                        {
+                            if (UseSingleSpell(ClassCfg.PullSpellId, false, mob))
+                                break;
+                        }
+                    }
+                }
+            }
+
             if (BestMob != null)
             {
                 foreach (var spell in ClassCfg.AttackSpellIds)
@@ -233,7 +288,6 @@ namespace PartyFarm
                 onMoveTick += PartyFarm_onMoveTick;
                 onCharacterMessage += PartyFarm_onCharacterMessage;
                 CanWork = true;
-                //EnableRandomJumpsOnMoves();
 
                 var cfgPath = "Configs/" + Me.Name + "_" + CurrentServer.Name + ".txt";
                 Log("Loading cfg: " + cfgPath, Me.Name);
@@ -243,6 +297,8 @@ namespace PartyFarm
                 InitClassCfg();
                 FarmZone = new RoundZone(FarmCfg.TotemInstallZone.X, FarmCfg.TotemInstallZone.Y, FarmCfg.FarmZoneRadius);
                 IsPuller = FarmCfg.PullPolygoneZone != null || FarmCfg.PullRoundZone != null;
+                if (ClassCfg.PullSpellId != 0)
+                    PullSpellRange = Math.Max(0, GetSpellCastRange(ClassCfg.PullSpellId));
 
                 Task.Run(() => MovesTask());
 
@@ -343,11 +399,13 @@ namespace PartyFarm
                             continue;
                         if (HealParty())
                             continue;
+                        if (PreventSpellcast())
+                            continue;
+                        if (CollectLoot())
+                            continue;
                         if (PullMobs())
                             continue;
                         if (BuffSelf())
-                            continue;
-                        if (CollectLoot())
                             continue;
                         if (Disenchant())
                             continue;
@@ -370,7 +428,6 @@ namespace PartyFarm
             }
             finally
             {
-                //DisableRandomJumpsOnMoves();
                 CanWork = false;
             }
         }
@@ -642,7 +699,7 @@ namespace PartyFarm
                 if (NextBestPosMoveAllow > DateTime.UtcNow)
                     return;
                 TryMoveToBestPos();
-                NextBestPosMoveAllow = DateTime.UtcNow.AddSeconds(RandomGen.Next(4, 10));
+                NextBestPosMoveAllow = DateTime.UtcNow.AddSeconds(RandomGen.Next(9, 25));
             }
         }
         bool CircleLineIntersectionLogic(Vector3F p1, Vector2F p2, Vector3F p3, float radius)
@@ -707,7 +764,8 @@ namespace PartyFarm
 
             if (!needCheck)
                 return;
-
+            if (BestMob.Distance2D(new Vector3F(FarmZone.X, FarmZone.Y, 0)) > 10)
+                return;
 
             Vector3F best = Vector3F.Zero;
             double distToBest = double.MaxValue;
@@ -748,6 +806,8 @@ namespace PartyFarm
                 ClassCfg = new MonkBrewmasterClassConfig();
             else if (Me.Class == EClass.Druid && Me.TalentSpecId == 102)
                 ClassCfg = new DruidBalance();
+            else if (Me.Class == EClass.Mage && Me.TalentSpecId == 64)
+                ClassCfg = new MageFrost();
             else if (Me.Class == EClass.Shaman && Me.TalentSpecId == 262)
                 ClassCfg = new ShamanElemental();
             else if (Me.Class == EClass.Hunter && Me.TalentSpecId == 254)
@@ -793,7 +853,7 @@ namespace PartyFarm
             }
             foreach (var mob in mobs)
             {
-                if (FarmCfg.MobIDs.Contains(mob.Id))
+                if (FarmCfg.MobIDs.ContainsKey(mob.Id))
                 {
                     if (mob.IsAlive)
                     {
@@ -822,11 +882,13 @@ namespace PartyFarm
             }
             foreach (var mob in mobs)
             {
-                if (FarmCfg.MobIDs.Contains(mob.Id) && mob.IsAlive
+                if (FarmCfg.MobIDs.ContainsKey(mob.Id) && mob.IsAlive
                     && !AggroMobsAll.Exists(b => b == mob) && mob.TargetGuid == WowGuid.Zero
                     &&
-                    ((FarmCfg.PullRoundZone != null && FarmCfg.PullRoundZone.ObjInZone(mob))
-                        || (FarmCfg.PullPolygoneZone != null && FarmCfg.PullPolygoneZone.ObjInZone(mob))
+                    (
+                            (FarmCfg.PullRoundZone != null && FarmCfg.PullRoundZone.ObjInZone(mob))
+                        ||  (FarmCfg.PullPolygoneZone != null && FarmCfg.PullPolygoneZone.ObjInZone(mob))
+                        ||  (ClassCfg.PullSpellId != 0 && mob.Distance(Me) < PullSpellRange)
                     )
                     )
                 {
@@ -1002,7 +1064,7 @@ namespace PartyFarm
             if (Me.HpPercents < 70)
                 return false;
             //увеличить при необходимости
-            if (AggroMobsInsideFarmZone.Count > FarmCfg.DontPullWhenXMobsInFarmZone)
+            if ((AggroMobsAll.Count - AggroMobsOnMe.Count) > FarmCfg.DontPullWhenXMobsInFarmZone)
                 return false;
             var d = Me.Distance2D(new Vector3F(FarmZone.X, FarmZone.Y, 0));
             uint r = 0;
@@ -1087,29 +1149,57 @@ namespace PartyFarm
             }
             return result;
         }
+
         Unit GetBestMob()
         {
             Unit result = null;
             BestMobInsideFZ = false;
             double dist = double.MaxValue;
+            uint prio = 0; //чем выше - тем выше приоритет
             foreach (var mob in AggroMobsInsideFarmZone)
             {
-                if (dist > Me.Distance(mob))
+                uint mobPrio = 0;
+                if (FarmCfg.MobIDs.ContainsKey(mob.Id))
+                    mobPrio = FarmCfg.MobIDs[mob.Id];
+                if (mobPrio > prio)
                 {
+                    prio = mobPrio;
                     result = mob;
                     BestMobInsideFZ = true;
                     dist = Me.Distance(mob);
+                }
+                else if (mobPrio == prio)
+                {
+                    if (dist > Me.Distance(mob))
+                    {
+                        result = mob;
+                        BestMobInsideFZ = true;
+                        dist = Me.Distance(mob);
+                    }
                 }
             }
             if (result == null)
             {
                 foreach (var mob in AggroMobsAll)
                 {
-                    if (dist > Me.Distance(mob))
+                    uint mobPrio = 0;
+                    if (FarmCfg.MobIDs.ContainsKey(mob.Id))
+                        mobPrio = FarmCfg.MobIDs[mob.Id];
+                    if (mobPrio > prio)
                     {
+                        prio = mobPrio;
                         result = mob;
+                        BestMobInsideFZ = true;
                         dist = Me.Distance(mob);
-                        BestMobInsideFZ = false;
+                    }
+                    else if (mobPrio == prio)
+                    {
+                        if (dist > Me.Distance(mob))
+                        {
+                            result = mob;
+                            dist = Me.Distance(mob);
+                            BestMobInsideFZ = false;
+                        }
                     }
                 }
             }
@@ -1205,7 +1295,47 @@ namespace PartyFarm
             }
             return false;
         }
-
+        List<uint> MobsCastersNeedPreventCast = new List<uint>() { 122240 };
+        Unit GetBestMobForSpellcastPreventing()
+        {
+            //статически пропишу айди кастеров которых повстречаю
+            Unit result = null;
+            double dist = 0;
+            foreach (var mob in AggroMobsAll)
+            {
+                if (!MobsCastersNeedPreventCast.Contains(mob.Id))
+                    continue;
+                var d = Me.Distance(mob);
+                if (d < 10 || mob.Distance2D(new Vector3F(FarmZone.X, FarmZone.Y, 0)) > 45)
+                    continue;
+                if (d > dist)
+                {
+                    result = mob;
+                    dist = d;
+                }
+            }
+            return result;
+        }
+        bool PreventSpellcast()
+        {
+            if (ClassCfg.SpellcastPreventSpellId != 0)
+            {
+                var mob = GetBestMobForSpellcastPreventing();
+                if (mob == null)
+                    return false;
+                if (!SpellManager.IsSpellReady(ClassCfg.SpellcastPreventSpellId))
+                    return false;
+                var spellInstant = IsSpellInstant(ClassCfg.SpellcastPreventSpellId);
+                var spellCastRange = Math.Max(0, GetSpellCastRange(ClassCfg.SpellcastPreventSpellId) - 1);
+                if (spellCastRange != 0 && spellCastRange < Me.Distance(mob))
+                    ComeToAndWaitStop(mob, Math.Max(0.5f, spellCastRange - 2), EMoveReason.ComeToMobForAttack);
+                if (!spellInstant && (Me.IsMoving || MoveQueue.Count > 0))
+                    CancelMovesAndWaitStop();
+                if (UseSingleSpell(ClassCfg.SpellcastPreventSpellId, !spellInstant, BestMob, new Vector3F(), false))
+                    return true;
+            }
+            return false;
+        }
         bool CollectLoot()
         {
             PickupLoot();
@@ -1277,11 +1407,26 @@ namespace PartyFarm
         {
             foreach (var cond in data.Conditions)
             {
+                if (cond.Type == EValueType.CreaturesCount)
+                {
+                    var condCount = GetEntities().Count(e => e.Id == cond.Value);
+                    if (!ConditionCompare(cond.Comparsion, condCount, cond.Value2))
+                        return false;
+                }
                 if (cond.Type == EValueType.HpPercent)
                 {
                     if (!ConditionCompare(cond.Comparsion, target.HpPercents, cond.Value))
                         return false;
                 }
+                if (cond.Type == EValueType.MinionExists && target as Player != null)
+                {
+                    if (cond.Value == 0 && cond.Comparsion == EComparsion.Equal)
+                    {
+                        if ((target as Player).MinionGuid != WowGuid.Zero)
+                            return false;
+                    }
+                }
+                
                 if (cond.Type == EValueType.MonkStagger && target as Player != null)
                 {
                     if (!ConditionCompare(cond.Comparsion, (int)(target as Player).MonkStagger, cond.Value))
@@ -1436,7 +1581,6 @@ namespace PartyFarm
             CanWork = false;
             MoveQueue = new ConcurrentQueue<MoveRequest>();
 
-            //DisableRandomJumpsOnMoves();
             CancelMoveTo();
             MoveForward(false);
             MoveBackward(false);
