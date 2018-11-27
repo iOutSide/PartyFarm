@@ -25,7 +25,11 @@ namespace PartyFarm
         BackToFarmZone,
         ComeToMobForPull,
         ComeToMobForAttack,
-        CollectLoot
+        CollectLoot,
+        ComeToResPlayer,
+        ComeToSafepoint,
+        ComeToFarmStartPoint,
+        ComeToServerPathPoint
     }
     [Flags]
     enum EFarmState
@@ -34,12 +38,17 @@ namespace PartyFarm
         LocalRepair = 2,
         LocalSell = 4,
         GlobalAuction = 8,
-        DefOrRegroup = 16,
+        NeedMoveToSafeZone = 16,
         NeedCallRepairman = 32,
         LocalEquip = 64,
+        DontPull = 128,
+
+
+        LocalAction = LocalRepair | LocalSell | LocalEquip | NeedCallRepairman
     }
     public class PartyFarm : Core
     {
+        public bool isReleaseVersion = true;
         static uint BlackOxTotem = 61146;
         static double MaxInteractionDistance = 5f;
 
@@ -47,35 +56,134 @@ namespace PartyFarm
         string RepairDoneMessage = "RepairDone";
         string NeedSellMessage = "NeedSell";
         string SellDoneMessage = "SellDone";
+        string DontPullMessage = "NeedStopPull";
+        string CanPullMessage = "CanPullAgain";
 
         double PullSpellRange = 30f;
         EMoveReason MoveReason = EMoveReason.None;
-        EFarmState State = EFarmState.Farming;
+        EFarmState State = 0;
         bool IsPuller; //пулеры не нужно возвращаться в зону фарма по кд, он туда возвращается когда нечего пулить или напулил.
         bool CanWork;
         FarmConfigDefault FarmCfg;
         ClassConfig ClassCfg;
+
+
         Unit Totem;
         Unit BestMob;
         bool BestMobInsideFZ = false;
-        List<Unit> MobsCanBePulled = new List<Unit>();
-        List<Unit> AggroMobsAll = new List<Unit>();
-        List<Unit> AggroMobsOnParty = new List<Unit>();
-        List<Unit> AggroMobsOnMe = new List<Unit>();
-        List<Unit> AggroMobsInsideFarmZone = new List<Unit>();
+        List<Unit> mobsCanBePulled = new List<Unit>();
+        List<Unit> aggroMobsAll = new List<Unit>();
+        List<Unit> aggroMobsOnParty = new List<Unit>();
+        List<Unit> aggroMobsOnMe = new List<Unit>();
+        List<Unit> aggroMobsInsideFarmZone = new List<Unit>();
+
+        List<Unit> GetMobsCanBePulled()
+        {
+            lock (VarLocker)
+                return mobsCanBePulled.ToList();
+        }
+        List<Unit> GetAggroMobsAll()
+        {
+            lock (VarLocker)
+                return aggroMobsAll.ToList();
+        }
+        List<Unit> GetAggroMobsOnParty()
+        {
+            lock (VarLocker)
+                return aggroMobsOnParty.ToList();
+        }
+        List<Unit> GetAggroMobsOnMe()
+        {
+            lock (VarLocker)
+                return aggroMobsOnMe.ToList();
+        }
+        List<Unit> GetAggroMobsInsideFarmZone()
+        {
+            lock (VarLocker)
+                return aggroMobsInsideFarmZone.ToList();
+        }
+
+        int GetMobsCanBePulledCount()
+        {
+            lock (VarLocker)
+                return mobsCanBePulled.Count;
+        }
+        int GetAggroMobsAllCount()
+        {
+            lock (VarLocker)
+                return aggroMobsAll.Count;
+        }
+        int GetAggroMobsOnPartyCount()
+        {
+            lock (VarLocker)
+                return aggroMobsOnParty.Count;
+        }
+        int GetAggroMobsOnMeCount()
+        {
+            lock (VarLocker)
+                return aggroMobsOnMe.Count;
+        }
+        int GetAggroMobsInsideFarmZoneCount()
+        {
+            lock (VarLocker)
+                return aggroMobsInsideFarmZone.Count;
+        }
 
         Random RandomGen = new Random((int)DateTime.UtcNow.Ticks);
-        DateTime NextDeleteTrashItem = DateTime.UtcNow;
-        DateTime NextDisenchant = DateTime.UtcNow;
-        DateTime NextCheckDist = DateTime.UtcNow; 
-        DateTime NextPickup = DateTime.UtcNow;
+        DateTime NextDeleteTrashItem = DateTime.MinValue;
+        DateTime NextDisenchant = DateTime.MinValue;
+        DateTime NextCheckDist = DateTime.MinValue; 
+        DateTime NextPickup = DateTime.MinValue;
+        DateTime NextRepairOrSellMessageAllow = DateTime.MinValue;
+        DateTime NextRepairOrSellAllow = DateTime.MinValue;
+        DateTime NextRandomMoveAllow = DateTime.UtcNow;
+        DateTime NextBestPosMoveAllow = DateTime.UtcNow;
+        DateTime NextRandomMovesDirChange = DateTime.UtcNow;
+        DateTime NextSpellResTry = DateTime.MinValue;
 
 
-        DateTime NextRepairOrSellMessageAllow = DateTime.UtcNow;
-        DateTime NextRepairOrSellAllow = DateTime.UtcNow;
+        void SendDontPull()
+        {
+            foreach (var g in Group.GetMembers())
+            {
+                var obj = GetEntity(g.Guid) as Player;
+                if (obj != null)
+                    SendMessageToWoWCharacter(obj.ServerName, obj.Name, DontPullMessage);
+            }
+        }
+        void SendCanPull()
+        {
+            foreach (var g in Group.GetMembers())
+            {
+                var obj = GetEntity(g.Guid) as Player;
+                if (obj != null)
+                    SendMessageToWoWCharacter(obj.ServerName, obj.Name, CanPullMessage);
+            }
+        }
+        bool IsWithinFarmZone()
+        {
+            return Me.Distance2D(new Vector3F(FarmZone.X, FarmZone.Y, 0)) < 150;
+        }
         void UpdateFarmState()
         {
             bool haveActiveRepairOrSellRequests = false;
+            bool haveActiveDpntPullRequests = false;
+
+
+            //действия ниже нельзя делать если мы труп
+            if (IsDead)
+                return;
+
+            if ((State & EFarmState.DontPull) != 0)
+            {
+                foreach (var r in DontPullRequests)
+                {
+                    if (r.Value > DateTime.UtcNow)
+                        haveActiveDpntPullRequests = true;
+                }
+                if (!haveActiveDpntPullRequests)
+                    State &= ~EFarmState.DontPull;
+            }
             if ((State & EFarmState.NeedCallRepairman) != 0)
             {
                 foreach (var r in RepairRequests)
@@ -93,8 +201,9 @@ namespace PartyFarm
                     State &= ~EFarmState.NeedCallRepairman;
             }
 
+            
 
-
+            
             bool needRepair = false;
             foreach (var i in ItemManager.GetItems())
             {
@@ -108,22 +217,28 @@ namespace PartyFarm
             if (needRepair && !string.IsNullOrEmpty(FarmCfg.Repairman))
             {
                 State |= EFarmState.LocalRepair;
-                if (string.Compare(Me.Name, FarmCfg.Repairman, true) == 0 && NextRepairOrSellMessageAllow < DateTime.UtcNow)
+                if (NextRepairOrSellMessageAllow < DateTime.UtcNow)
                 {
                     NextRepairOrSellMessageAllow = DateTime.UtcNow.AddSeconds(20);
-                    SendMessageToWoWCharacter(CurrentServer.Name, Me.Name, NeedRepairMessage);
-                }
-                foreach (var p in GetEntities<Player>())
-                {
-                    if (string.Compare(p.Name, FarmCfg.Repairman, true) == 0 && NextRepairOrSellMessageAllow < DateTime.UtcNow)
+                    if (string.Compare(Me.Name, FarmCfg.Repairman, true) == 0)
+                        SendMessageToWoWCharacter(CurrentServer.Name, Me.Name, NeedRepairMessage);
+                    foreach (var p in GetEntities<Player>())
                     {
-                        NextRepairOrSellMessageAllow = DateTime.UtcNow.AddSeconds(20);
-                        SendMessageToWoWCharacter(p.ServerName, p.Name, NeedRepairMessage);
+                        if (string.Compare(p.Name, FarmCfg.Repairman, true) == 0)
+                            SendMessageToWoWCharacter(p.ServerName, p.Name, NeedRepairMessage);
                     }
+                    SendDontPull();
                 }
             }
             else
+            {
+                bool changed = false;
+                if ((State & EFarmState.LocalRepair) != 0)
+                    changed = true;
                 State &= ~EFarmState.LocalRepair;
+                if (changed && (State & EFarmState.LocalAction) == 0)
+                    SendCanPull();
+            }
 
 
 
@@ -132,22 +247,28 @@ namespace PartyFarm
             if (needSell && !string.IsNullOrEmpty(FarmCfg.Repairman))
             {
                 State |= EFarmState.LocalSell;
-                if (string.Compare(Me.Name, FarmCfg.Repairman, true) == 0 && NextRepairOrSellMessageAllow < DateTime.UtcNow)
+                if (NextRepairOrSellMessageAllow < DateTime.UtcNow)
                 {
                     NextRepairOrSellMessageAllow = DateTime.UtcNow.AddSeconds(20);
-                    SendMessageToWoWCharacter(CurrentServer.Name, Me.Name, NeedSellMessage);
-                }
-                foreach (var p in GetEntities<Player>())
-                {
-                    if (string.Compare(p.Name, FarmCfg.Repairman, true) == 0 && NextRepairOrSellMessageAllow < DateTime.UtcNow)
+                    if (string.Compare(Me.Name, FarmCfg.Repairman, true) == 0)
+                        SendMessageToWoWCharacter(CurrentServer.Name, Me.Name, NeedSellMessage);
+                    foreach (var p in GetEntities<Player>())
                     {
-                        NextRepairOrSellMessageAllow = DateTime.UtcNow.AddSeconds(20);
-                        SendMessageToWoWCharacter(p.ServerName, p.Name, NeedSellMessage);
+                        if (string.Compare(p.Name, FarmCfg.Repairman, true) == 0)
+                            SendMessageToWoWCharacter(p.ServerName, p.Name, NeedSellMessage);
                     }
+                    SendDontPull();
                 }
             }
             else
+            {
+                bool changed = false;
+                if ((State & EFarmState.LocalSell) != 0)
+                    changed = true;
                 State &= ~EFarmState.LocalSell;
+                if (changed && (State & EFarmState.LocalAction) == 0)
+                    SendCanPull();
+            }
 
 
             var toEquip = EquipBestArmorAndWeapon();
@@ -156,14 +277,28 @@ namespace PartyFarm
                 foreach (var e in toEquip)
                     Console.WriteLine("CAN EQUIP: " + e.Name + "[" + e.Level + "]");
             if (needEquip)
+            {
+                if ((State & EFarmState.LocalEquip) == 0)
+                    SendDontPull();
                 State |= EFarmState.LocalEquip;
+            }
             else
+            {
+                bool changed = false;
+                if ((State & EFarmState.LocalEquip) != 0)
+                    changed = true;
                 State &= ~EFarmState.LocalEquip;
+                if (changed && (State & EFarmState.LocalAction) == 0)
+                    SendCanPull();
+            }
+
         }
+        Dictionary<string, DateTime> DontPullRequests = new Dictionary<string, DateTime>();
         Dictionary<string, DateTime> RepairRequests = new Dictionary<string, DateTime>();
         Dictionary<string, DateTime> SellRequests = new Dictionary<string, DateTime>();
         void PartyFarm_onCharacterMessage(string SenderServerName, string SenderName, string Message)
         {
+            Log(SenderName + "-" + SenderServerName + ": " + Message, Me.Name);
             if (Message == NeedRepairMessage)
             {
                 RepairRequests[SenderName + "-" + SenderServerName] = DateTime.UtcNow.AddMinutes(1);
@@ -178,6 +313,14 @@ namespace PartyFarm
                 RepairRequests[SenderName + "-" + SenderServerName] = DateTime.MinValue;
             if (Message == SellDoneMessage)
                 SellRequests[SenderName + "-" + SenderServerName] = DateTime.MinValue;
+
+            if (Message == DontPullMessage)
+            {
+                DontPullRequests[SenderName + "-" + SenderServerName] = DateTime.UtcNow.AddMinutes(1);
+                State |= EFarmState.DontPull;
+            }
+            if (Message == CanPullMessage)
+                DontPullRequests[SenderName + "-" + SenderServerName] = DateTime.MinValue;
         }
         void SellAllTrash()
         {
@@ -203,80 +346,235 @@ namespace PartyFarm
             }
         }
 
-        List<Unit> AggroMobsAll2 = new List<Unit>();
-        List<Unit> MobsCanBePulled2 = new List<Unit>();
         void CommonActions()
         {
-            //в процессе бега проверяем что можно продолжать пулить
-            if (MoveReason == EMoveReason.ComeToMobForPull && !CanContinuePull())
-                CancelMovesAndWaitStop();
-
-            if (MoveReason == EMoveReason.ComeToMobForPull || MoveReason == EMoveReason.BackToFarmZone)
+            if (State == EFarmState.NeedMoveToSafeZone && (MoveReason == EMoveReason.ComeToSafepoint || MoveReason == EMoveReason.ComeToServerPathPoint))
             {
-                //пока бежим - проверяем может кого то еще запулить можем
-                if (ClassCfg.PullSpellId != 0)
+                if (BestMob != null && (Me.IsMoving || MoveQueue.Count != 0))
+                    CancelMovesAndWaitStop();
+            }
+            if (State == EFarmState.Farming)
+            {
+                //в процессе бега проверяем что можно продолжать пулить
+                if (MoveReason == EMoveReason.ComeToMobForPull && !CanContinuePull())
+                    CancelMovesAndWaitStop();
+
+                if (MoveReason == EMoveReason.ComeToMobForPull || MoveReason == EMoveReason.BackToFarmZone)
                 {
-                    AggroMobsAll2.Clear();
-                    MobsCanBePulled2.Clear();
-                    foreach (var t in GetThreats())
-                        AggroMobsAll2.Add(t.Obj);
-                    foreach (var mob in GetEntities<Unit>())
+                    //пока бежим - проверяем может кого то еще запулить можем
+                    if (ClassCfg.PullSpellId != 0)
                     {
-                        if (FarmCfg.MobIDs.ContainsKey(mob.Id))
+                        foreach (var mob in GetMobsCanBePulled())
                         {
-                            if (mob.IsAlive)
+                            if (PullSpellRange == 0 || (PullSpellRange != 0 && PullSpellRange > Me.Distance(mob)))
                             {
-                                if (Totem != null && mob.Target == Totem)
-                                    AggroMobsAll2.Add(mob);
-                                foreach (var p in GroupPlayers)
-                                {
-                                    if (mob.Target == p)
-                                        AggroMobsAll2.Add(mob);
-                                }
+                                if (UseSingleSpell(ClassCfg.PullSpellId, false, mob) == ESpellCastError.SUCCESS)
+                                    break;
                             }
-                        }
-                    }
-                    foreach (var mob in GetEntities<Unit>())
-                    {
-                        if (FarmCfg.MobIDs.ContainsKey(mob.Id) && mob.IsAlive
-                            && !AggroMobsAll.Exists(b => b == mob) && mob.TargetGuid == WowGuid.Zero
-                            && ClassCfg.PullSpellId != 0 && mob.Distance(Me) < PullSpellRange)
-                        {
-                            if (GetVar(mob, "los") == null)
-                                MobsCanBePulled2.Add(mob);
-                            else
-                            {
-                                var dt = (DateTime)GetVar(mob, "los");
-                                if (dt.AddSeconds(60) < DateTime.UtcNow)
-                                    MobsCanBePulled2.Add(mob);
-                            }
-                        }
-                    }
-                    foreach (var mob in MobsCanBePulled2)
-                    {
-                        if (PullSpellRange == 0 || (PullSpellRange != 0 && PullSpellRange > Me.Distance(mob)))
-                        {
-                            if (UseSingleSpell(ClassCfg.PullSpellId, false, mob))
-                                break;
                         }
                     }
                 }
-            }
 
-            if (BestMob != null)
-            {
-                foreach (var spell in ClassCfg.AttackSpellIds)
+                if (BestMob != null)
                 {
-                    if (!spell.IsInstaForAoeFarm)
-                        continue;
-                    var spellInstant = IsSpellInstant(spell.Id);
-                    var spellCastRange = Math.Max(0, GetSpellCastRange(spell.Id) - 1);
-                    if (spellCastRange != 0 && spellCastRange > Me.Distance(BestMob))
-                        continue;
-                    if (UseSingleSpell(spell.Id, false, BestMob, spell.SendLocation ? BestMob.Location : new Vector3F(), false))
+                    foreach (var spell in ClassCfg.AttackSpellIds)
+                    {
+                        if (!spell.IsInstaForAoeFarm)
+                            continue;
+                        var spellInstant = IsSpellInstant(spell.Id);
+                        var spellCastRange = Math.Max(0, GetSpellCastRange(spell.Id) - 1);
+                        if (spellCastRange != 0 && spellCastRange > Me.Distance(BestMob))
+                            continue;
+                        if (UseSingleSpell(spell.Id, false, BestMob, spell.SendLocation ? BestMob.Location : new Vector3F(), false) == ESpellCastError.SUCCESS)
+                            return;
+                    }
+                }
+            }
+        }
+        bool IsDead
+        {
+            get
+            {
+                if (Me.IsAlive && Me.IsDeadGhost)
+                    return true;
+                else if (!Me.IsAlive)
+                    return true;
+                return false;
+            }
+        }
+        Vector3F SafeRegroupPointRandomized;
+        void Route()
+        {
+            try
+            {
+                if (IsDead)
+                {
+                    if (ResurrecterGuid != WowGuid.Zero)
+                    {
+                        foreach (var g in Group.GetMembers())
+                        {
+                            if (g.Guid == ResurrecterGuid)
+                                AcceptRessurect();
+                        }
+                    }
+                    return;
+                }
+
+                if ((State & EFarmState.NeedCallRepairman) != 0 && FarmCfg.RepairmanMountSpellId != 0)
+                {
+                    if (FarmCfg.RepairSummonPoint != Vector3F.Zero && Me.Distance(FarmCfg.RepairSummonPoint) > 3)
+                        ComeToAndWaitStop(FarmCfg.RepairSummonPoint, 1, EMoveReason.ComeToRepairPoint);
+                    Unit npcRepairman = GetEntities<Unit>().FirstOrDefault(npc => npc.IsVendor && npc.IsArmorer);
+                    if (!Me.IsInCombat && npcRepairman == null)
+                        SpellManager.CastSpell(FarmCfg.RepairmanMountSpellId);
+                }
+
+                if ((State & EFarmState.LocalRepair) != 0 && NextRepairOrSellAllow < DateTime.UtcNow)
+                {
+                    Unit npcRepairman = GetEntities<Unit>().FirstOrDefault(npc => npc.IsVendor && npc.IsArmorer);
+                    if (npcRepairman != null)
+                    {
+                        NextRepairOrSellAllow = DateTime.UtcNow.AddSeconds(30);
+                        ComeToAndWaitStop(npcRepairman, 1f, EMoveReason.ComeToRepairman);
+                        if (ItemManager.RepairAllItems())
+                        {
+                            if (string.Compare(Me.Name, FarmCfg.Repairman, true) == 0)
+                                SendMessageToWoWCharacter(CurrentServer.Name, Me.Name, RepairDoneMessage);
+                            foreach (var p in GetEntities<Player>())
+                            {
+                                if (string.Compare(p.Name, FarmCfg.Repairman, true) == 0)
+                                    SendMessageToWoWCharacter(p.ServerName, p.Name, RepairDoneMessage);
+                            }
+                            State &= ~EFarmState.LocalRepair;
+                            if ((State & EFarmState.LocalAction) == 0)
+                                SendCanPull();
+                        }
+                        return;
+                    }
+                }
+                if ((State & EFarmState.LocalSell) != 0 && NextRepairOrSellAllow < DateTime.UtcNow)
+                {
+                    Unit npcRepairman = GetEntities<Unit>().FirstOrDefault(npc => npc.IsVendor);
+                    if (npcRepairman != null)
+                    {
+                        NextRepairOrSellAllow = DateTime.UtcNow.AddSeconds(30);
+                        ComeToAndWaitStop(npcRepairman, 1f, EMoveReason.ComeToRepairman);
+                        SellAllTrash();
+                        if (string.Compare(Me.Name, FarmCfg.Repairman, true) == 0)
+                            SendMessageToWoWCharacter(CurrentServer.Name, Me.Name, SellDoneMessage);
+                        foreach (var p in GetEntities<Player>())
+                        {
+                            if (string.Compare(p.Name, FarmCfg.Repairman, true) == 0)
+                                SendMessageToWoWCharacter(p.ServerName, p.Name, SellDoneMessage);
+                        }
+                        State &= ~EFarmState.LocalSell;
+                        if ((State & EFarmState.LocalAction) == 0)
+                            SendCanPull();
+                        return;
+                    }
+                }
+                if ((State & EFarmState.LocalEquip) != 0)
+                {
+                    if (FarmCfg.RepairSummonPoint != Vector3F.Zero && Me.Distance(FarmCfg.RepairSummonPoint) > 3)
+                        ComeToAndWaitStop(FarmCfg.RepairSummonPoint, 1, EMoveReason.ComeToRepairPoint);
+                    if (!Me.IsInCombat)
+                    {
+                        var toEquip = EquipBestArmorAndWeapon();
+                        if (toEquip != null)
+                        {
+                            foreach (var item in toEquip)
+                            {
+                                if (item.Equip())
+                                    Thread.Sleep(RandomGen.Next(555, 1555));
+                            }
+                        }
+                    }
+                }
+
+
+                //мы не можем фармить, если
+                //(State & EFarmState.NeedCallRepairman) != 0 
+                //(State & EFarmState.LocalEquip) != 0
+                //LocalRepair и LocalSell - требующие нпц - не дойдут сюда, если нпц есть
+                if ((State & EFarmState.NeedCallRepairman) != 0 || (State & EFarmState.LocalEquip) != 0)
+                    return;
+
+
+
+
+                CommonActions();
+                WaitCasts();
+                if ((State & EFarmState.NeedMoveToSafeZone) != 0)
+                {
+                    if (CheckNeedResAnothers())
+                        return;
+                    if (HealSelf())
+                        return;
+                    if (HealParty())
+                        return;
+                    if (BestMob != null)
+                    {
+                        if (BuffSelf())
+                            return;
+                        if (UseAttackSpells())
+                            return;
+                    }
+                    else
+                    {
+                        if (Me.Distance(SafeRegroupPointRandomized) > 10)
+                            ComeToAndWaitStop(SafeRegroupPointRandomized, 2.5, EMoveReason.ComeToSafepoint);
+                    }
+                }
+                else if ((State & EFarmState.Farming) != 0)
+                {
+                    CancelMounts();
+                    DeteleTrashItems();
+
+                    if (CheckNeedResAnothers())
+                        return;
+                    if (CheckShapeshift())
+                        return;
+                    if (CheckDistToFarmZone())
+                        return;
+                    if (UseTotem())
+                        return;
+                    if (HealSelf())
+                        return;
+                    if (HealParty())
+                        return;
+                    if (PreventSpellcast())
+                        return;
+                    if (CollectLoot())
+                        return;
+                    if (PullMobs())
+                        return;
+                    if (BuffSelf())
+                        return;
+                    if (Disenchant())
+                        return;
+                    if (UseTaunt())
+                        return;
+                    TryRandomMoves();
+
+                    if (UseAttackSpells())
                         return;
                 }
             }
+            catch (Exception e)
+            {
+                    Console.WriteLine(e);
+            }
+        }
+
+        Vector3F HordeMailbox = new Vector3F(1606.69, -4422.37, 13.73);
+        Vector3F HordeAuction = new Vector3F(1639.26, -4443.71, 17.05);
+        public void MoveToSafeSpot()
+        { }
+        public void SellOnAuction()
+        {
+            uint AllianceAuctionMapId = 0;
+            uint HordeAuctionMapId = 1;
+            //Me.Team 
         }
         public void PluginRun()
         {
@@ -287,6 +585,7 @@ namespace PartyFarm
                 ClearLogs();
                 onMoveTick += PartyFarm_onMoveTick;
                 onCharacterMessage += PartyFarm_onCharacterMessage;
+                onChatMessage += PartyFarm_onChatMessage;
                 CanWork = true;
 
                 var cfgPath = "Configs/" + Me.Name + "_" + CurrentServer.Name + ".txt";
@@ -296,129 +595,29 @@ namespace PartyFarm
                 Log(FarmCfg.TotemInstallZone.X + ", " + FarmCfg.TotemInstallZone.Y, Me.Name);
                 InitClassCfg();
                 FarmZone = new RoundZone(FarmCfg.TotemInstallZone.X, FarmCfg.TotemInstallZone.Y, FarmCfg.FarmZoneRadius);
+                SafeZone = new RoundZone(FarmCfg.SafeRegroupPoint.X, FarmCfg.SafeRegroupPoint.Y, 8);
+                SafeRegroupPointRandomized = new Vector3F(FarmCfg.SafeRegroupPoint.X + GetRandomNumber(-3,3), FarmCfg.SafeRegroupPoint.Y + GetRandomNumber(-3, 3), FarmCfg.SafeRegroupPoint.Z);
                 IsPuller = FarmCfg.PullPolygoneZone != null || FarmCfg.PullRoundZone != null;
                 if (ClassCfg.PullSpellId != 0)
                     PullSpellRange = Math.Max(0, GetSpellCastRange(ClassCfg.PullSpellId));
 
+                if (IsWithinFarmZone() && !SafeZone.ObjInZone(Me))
+                    State |= EFarmState.Farming;
+                else
+                    State |= EFarmState.NeedMoveToSafeZone;
+
+
+
                 Task.Run(() => MovesTask());
-
-                while (GameState == EGameState.Ingame)
+                Task.Run(() => SetupVariables()); 
+                while (GameState != EGameState.Offline)
                 {
+                    while (GameState != EGameState.Ingame)
+                        Thread.Sleep(1000);
                     UpdateFarmState();
-                    if ((State & EFarmState.LocalRepair) != 0 && NextRepairOrSellAllow < DateTime.UtcNow)
-                    {
-                        Unit npcRepairman = GetEntities<Unit>().FirstOrDefault(npc => npc.IsVendor && npc.IsArmorer);
-                        if (npcRepairman != null)
-                        {
-                            NextRepairOrSellAllow = DateTime.UtcNow.AddSeconds(30);
-                            ComeToAndWaitStop(npcRepairman, 1f, EMoveReason.ComeToRepairman);
+                    Route();
 
-                            if (ItemManager.RepairAllItems())
-                            {
-                                if (string.Compare(Me.Name, FarmCfg.Repairman, true) == 0)
-                                    SendMessageToWoWCharacter(CurrentServer.Name, Me.Name, RepairDoneMessage);
-                                foreach (var p in GetEntities<Player>())
-                                {
-                                    if (string.Compare(p.Name, FarmCfg.Repairman, true) == 0)
-                                        SendMessageToWoWCharacter(p.ServerName, p.Name, RepairDoneMessage);
-                                }
-                                State &= ~EFarmState.LocalRepair;
-                            }
-                        }
-                    }
-
-                    if ((State & EFarmState.LocalSell) != 0 && NextRepairOrSellAllow < DateTime.UtcNow)
-                    {
-                        Unit npcRepairman = GetEntities<Unit>().FirstOrDefault(npc => npc.IsVendor);
-                        if (npcRepairman != null)
-                        {
-                            NextRepairOrSellAllow = DateTime.UtcNow.AddSeconds(30);
-                            ComeToAndWaitStop(npcRepairman, 1f, EMoveReason.ComeToRepairman);
-
-                            SellAllTrash();
-                            if (string.Compare(Me.Name, FarmCfg.Repairman, true) == 0)
-                                SendMessageToWoWCharacter(CurrentServer.Name, Me.Name, SellDoneMessage);
-                            foreach (var p in GetEntities<Player>())
-                            {
-                                if (string.Compare(p.Name, FarmCfg.Repairman, true) == 0)
-                                    SendMessageToWoWCharacter(p.ServerName, p.Name, SellDoneMessage);
-                            }
-                            State &= ~EFarmState.LocalSell;
-                        }
-                    }
-
-                    if ((State & EFarmState.NeedCallRepairman) != 0 && FarmCfg.RepairmanMountSpellId != 0)
-                    {
-                        if (FarmCfg.RepairSummonPoint != Vector3F.Zero && Me.Distance(FarmCfg.RepairSummonPoint) > 3)
-                            ComeToAndWaitStop(FarmCfg.RepairSummonPoint, 1, EMoveReason.ComeToRepairPoint);
-                        Unit npcRepairman = GetEntities<Unit>().FirstOrDefault(npc => npc.IsVendor && npc.IsArmorer);
-                        if (!Me.IsInCombat && npcRepairman == null)
-                            SpellManager.CastSpell(FarmCfg.RepairmanMountSpellId);
-                        Thread.Sleep(1000);
-                    }
-                    else if ((State & EFarmState.LocalEquip) != 0)
-                    {
-                        if (FarmCfg.RepairSummonPoint != Vector3F.Zero && Me.Distance(FarmCfg.RepairSummonPoint) > 3)
-                            ComeToAndWaitStop(FarmCfg.RepairSummonPoint, 1, EMoveReason.ComeToRepairPoint);
-                        if (!Me.IsInCombat)
-                        {
-                            var toEquip = EquipBestArmorAndWeapon();
-                            if (toEquip != null)
-                            {
-                                foreach (var item in toEquip)
-                                {
-                                    if (item.Equip())
-                                    {
-                                        Log("Одеваю [" + item.InventoryType + "] " + item.Name, Me.Name);
-                                        Thread.Sleep(RandomGen.Next(555, 1555));
-                                    }
-                                }
-                            }
-                        }
-                        Thread.Sleep(1000);
-                    }
-                    else if ((State & EFarmState.Farming) != 0)
-                    {
-                        if (!Me.IsAlive)
-                        {
-                            Thread.Sleep(1000);
-                            continue;
-                        }
-                        CancelMounts();
-                        WaitCasts();
-                        SetupVariables();
-                        DeteleTrashItems();
-                        CommonActions(); //вещи, которые можно сделать моментально или в процессе бега
-                        if (CheckShapeshift())
-                            continue;
-                        if (UseTotem())
-                            continue;
-                        if (CheckDistToFarmZone())
-                            continue;
-                        if (HealSelf())
-                            continue;
-                        if (HealParty())
-                            continue;
-                        if (PreventSpellcast())
-                            continue;
-                        if (CollectLoot())
-                            continue;
-                        if (PullMobs())
-                            continue;
-                        if (BuffSelf())
-                            continue;
-                        if (Disenchant())
-                            continue;
-                        if (UseTaunt())
-                            continue;
-                        TryRandomMoves();
-
-                        if (UseAttackSpells())
-                            continue;
-
-
-                        Thread.Sleep(100);
-                    }
+                    Thread.Sleep(100);
                 }
             }
             catch
@@ -432,6 +631,25 @@ namespace PartyFarm
             }
         }
 
+        private void PartyFarm_onChatMessage(EChatMessageType type, string text, string receiver)
+        {
+            if (type == EChatMessageType.Party || type == EChatMessageType.PartyLeader)
+            {
+                if (text.ToLower() == "go farm")
+                {
+                    Thread.Sleep(RandomGen.Next(0, 2000));
+                    State &= ~EFarmState.NeedMoveToSafeZone;
+                    State |= EFarmState.Farming;
+                }
+                if (text.ToLower() == "go afk")
+                {
+                    Thread.Sleep(RandomGen.Next(0, 2000));
+                    State &= ~EFarmState.Farming;
+                    State |= EFarmState.NeedMoveToSafeZone;
+                }
+            }
+        }
+
         private void PartyFarm_onMoveTick(Vector3F loc)
         {
             if (GameState == EGameState.Ingame)
@@ -441,13 +659,19 @@ namespace PartyFarm
         }
         void DeteleTrashItems()
         {
+            List<uint> AdditionaItemsForDelete = new List<uint>() { 155593, 163580 };
             if (!FarmCfg.DeleteTrashItems)
                 return;
             if (NextDeleteTrashItem > DateTime.UtcNow)
                 return;
             foreach (var i in ItemManager.GetItems())
             {
-                if (i.ItemQuality == EItemQuality.Poor && i.Place >= EItemPlace.InventoryBag && i.Place <= EItemPlace.Bag4
+                if (AdditionaItemsForDelete.Contains(i.Id))
+                {
+                    i.Destroy();
+                    NextDeleteTrashItem = DateTime.UtcNow.AddMilliseconds(RandomGen.Next(1111, 2222));
+                }
+                else if (i.ItemQuality == EItemQuality.Poor && i.Place >= EItemPlace.InventoryBag && i.Place <= EItemPlace.Bag4
                     && (i.ItemClass == EItemClass.Armor || i.ItemClass == EItemClass.Weapon))
                 {
                     i.Destroy();
@@ -473,11 +697,12 @@ namespace PartyFarm
             public Vector3F LookAt;
             public Entity Obj;
             public double dist;
+            public double doneDist = 0;
             public EMoveCallCmdType Type;
+            public bool SetOnlyFalseResult = false;
         }
-        DateTime NextRandomMoveAllow = DateTime.UtcNow;
-        DateTime NextBestPosMoveAllow = DateTime.UtcNow;
         RoundZone FarmZone;
+        RoundZone SafeZone;
         bool IsRandomMove;
         Unit RandomMoveMob;
         Dictionary<Guid, int> MoveResults = new Dictionary<Guid, int>();
@@ -498,15 +723,56 @@ namespace PartyFarm
                             MoveReason = req.Reason;
                             if (req.Type == EMoveCallCmdType.ComeTo)
                             {
-                                bool result = MoveTo(new MoveParams()
+                                bool result = false;
+                                if (req.Obj == null && Me.Distance(req.Pos) > 500)
                                 {
-                                    Location = req.Pos,
-                                    Obj = req.Obj,
-                                    Dist = req.dist,
-                                    UseNavCall = true,
-                                    //IgnoreStuckCheck = true
-                                });
-                                MoveResults[req.Guid] = result ? 1 : -1;
+                                    var path = GetServerPath(Me.Location, req.Pos);
+                                    if (!path.IsToPointInsideMesh || !path.IsFromPointInsideMesh)
+                                        MoveResults[req.Guid] = -1;
+                                    else
+                                    {
+                                        for (int i = 0; i < path.Path.Count - 1; i++)
+                                        {
+                                            MoveQueue.Enqueue(new MoveRequest()
+                                            {
+                                                Type = EMoveCallCmdType.ComeTo,
+                                                Pos = path.Path[i],
+                                                Guid = req.Guid,
+                                                dist = 1,
+                                                doneDist = 1.5f,
+                                                Reason = EMoveReason.ComeToServerPathPoint,
+                                                SetOnlyFalseResult = true
+                                            });
+                                        }
+                                        MoveQueue.Enqueue(new MoveRequest()
+                                        {
+                                            Type = EMoveCallCmdType.ComeTo,
+                                            Pos = path.Path[path.Path.Count - 1],
+                                            Guid = req.Guid,
+                                            dist = 1,
+                                            Reason = EMoveReason.ComeToServerPathPoint
+                                        });
+                                    }
+                                }
+                                else
+                                {
+                                    result = MoveTo(new MoveParams()
+                                    {
+                                        Location = req.Pos,
+                                        Obj = req.Obj,
+                                        Dist = req.dist,
+                                        DoneDist = req.doneDist,
+                                        UseNavCall = true,
+                                        //IgnoreStuckCheck = true
+                                    });
+                                    if (req.SetOnlyFalseResult)
+                                    {
+                                        if (!result)
+                                            MoveResults[req.Guid] = -1;
+                                    }
+                                    else
+                                    MoveResults[req.Guid] = result ? 1 : -1;
+                                }
                             }
                             else if (req.Type == EMoveCallCmdType.MoveWithLookAt)
                             {
@@ -566,6 +832,7 @@ namespace PartyFarm
             req.Reason = reason;
             MoveQueue.Enqueue(req);
         }
+     
         bool ComeToAndWaitStop(Vector3F pos, double dist, EMoveReason reason)
         {
             var guid = Guid.NewGuid();
@@ -610,12 +877,11 @@ namespace PartyFarm
                 Thread.Sleep(5);
             return result;
         }
-        DateTime RandomMovesNextDirChange = DateTime.UtcNow;
         void UpdateRandomMoveTimes()
         {
-            if (RandomMovesNextDirChange < DateTime.UtcNow)
+            if (NextRandomMovesDirChange < DateTime.UtcNow)
             {
-                RandomMovesNextDirChange = DateTime.UtcNow.AddSeconds(RandomGen.Next(5, 20));
+                NextRandomMovesDirChange = DateTime.UtcNow.AddSeconds(RandomGen.Next(5, 20));
                 RandDirLeft = !RandDirLeft;
             }
         }
@@ -685,7 +951,7 @@ namespace PartyFarm
                     else
                     {
                         req.LookAt = BestMob.Location; //или в центр зоны?
-                        req.Pos = new Vector3F(FarmZone.X + dist2 * Math.Cos(angle), FarmZone.Y + dist2 * Math.Sin(angle), GetNavMeshHeight(FarmZone.X + dist2 * Math.Cos(angle), FarmZone.Y + dist2 * Math.Sin(angle)));
+                        req.Pos = new Vector3F(FarmZone.X + dist2 * Math.Cos(angle), FarmZone.Y + dist2 * Math.Sin(angle), GetNavMeshHeight(new Vector3F(FarmZone.X + dist2 * Math.Cos(angle), FarmZone.Y + dist2 * Math.Sin(angle), 0)));
                     }
 
 
@@ -721,7 +987,7 @@ namespace PartyFarm
             const uint LosDegrees = 15;
             uint result = 0;
 
-            var list = AggroMobsInsideFarmZone.ToList();
+            var list = GetAggroMobsInsideFarmZone();
 
             var direction = new Vector2F((float)Math.Cos(angle) * 30 + pos.X, (float)Math.Sin(angle) * 30 + pos.Y);
             Action calc = new Action(() =>
@@ -754,12 +1020,12 @@ namespace PartyFarm
         {
             //Если на мне висит 1+ моб, или конус от моего зрения не видит всех мобов в фарм зоне 
             //считаем 10 рандомных точек в пределах фарм зоны пытаясь найти лучшую рандомную, откуда будет видно всех врагов
-            bool needCheck = AggroMobsOnMe.Count > 0;
+            bool needCheck = GetAggroMobsOnMeCount() > 0;
             uint visibleBest = 0;
             if (!needCheck)
             {
                 visibleBest = CountVisibleMobs(Me.Location, Me.Rotation.Y);
-                needCheck = visibleBest < AggroMobsInsideFarmZone.Count;
+                needCheck = visibleBest < GetAggroMobsInsideFarmZoneCount();
             }
 
             if (!needCheck)
@@ -818,91 +1084,104 @@ namespace PartyFarm
                 ClassCfg = new ClassConfig();
             }
         }
-        
+
+        object VarLocker = new object();
         void SetupVariables()
         {
-            Totem = null;
-            AggroMobsAll.Clear();
-            AggroMobsOnParty.Clear();
-            AggroMobsOnMe.Clear();
-            AggroMobsInsideFarmZone.Clear();
-            GroupPlayers.Clear();
-            LootableMobs.Clear();
-            MobsCanBePulled.Clear();
-            var mobs = GetEntities<Unit>();
-            var players = GetEntities<Player>();
-            foreach (var p in players)
+            while (CanWork)
             {
-                if (Me.IsInSameGroupWith(p))
-                    GroupPlayers.Add(p);
-            }
-            foreach (var mob in mobs)
-            {
-                if (mob.Id == BlackOxTotem && 
-                    (mob.CreatorGuid == Me.Guid || GroupPlayers.Exists(p => p.Guid == mob.CreatorGuid)))
+                try
                 {
-                    Totem = mob;
-                    break;
-                }
-            }
-            foreach (var t in GetThreats())
-            {
-                AggroMobsAll.Add(t.Obj);
-                if (t.Obj.Target == Me)
-                    AggroMobsOnMe.Add(t.Obj);
-            }
-            foreach (var mob in mobs)
-            {
-                if (FarmCfg.MobIDs.ContainsKey(mob.Id))
-                {
-                    if (mob.IsAlive)
+                    Thread.Sleep(100);
+                    lock (VarLocker)
                     {
-                        if (Totem != null && mob.Target == Totem)
-                            AggroMobsAll.Add(mob);
-                        foreach (var p in GroupPlayers)
+                        Totem = null;
+                        aggroMobsAll.Clear();
+                        aggroMobsOnParty.Clear();
+                        aggroMobsOnMe.Clear();
+                        aggroMobsInsideFarmZone.Clear();
+                        mobsCanBePulled.Clear();
+                        GroupPlayers.Clear();
+                        LootableMobs.Clear();
+                        var mobs = GetEntities<Unit>();
+                        var players = GetEntities<Player>();
+                        foreach (var p in players)
                         {
-                            if (mob.Target == p)
+                            if (Me.IsInSameGroupWith(p))
+                                GroupPlayers.Add(p);
+                        }
+                        foreach (var mob in mobs)
+                        {
+                            if (mob.Id == BlackOxTotem &&
+                                (mob.CreatorGuid == Me.Guid || GroupPlayers.Exists(p => p.Guid == mob.CreatorGuid)))
                             {
-                                AggroMobsAll.Add(mob);
-                                AggroMobsOnParty.Add(mob);
+                                Totem = mob;
+                                break;
                             }
                         }
+                        foreach (var t in GetThreats())
+                        {
+                            aggroMobsAll.Add(t.Obj);
+                            if (t.Obj.Target == Me)
+                                aggroMobsOnMe.Add(t.Obj);
+                        }
+                        foreach (var mob in mobs)
+                        {
+                            //if (FarmCfg.MobIDs.ContainsKey(mob.Id))
+                            if (CanAttack(mob, 0) && mob.IsAlive)
+                            {
+                                if (Totem != null && mob.Target == Totem)
+                                    aggroMobsAll.Add(mob);
+                                foreach (var p in GroupPlayers)
+                                {
+                                    if (mob.Target == p)
+                                    {
+                                        aggroMobsAll.Add(mob);
+                                        aggroMobsOnParty.Add(mob);
+                                    }
+                                }
+                            }
+                            if (!mob.IsAlive && mob.Distance(Totem) < 15 && mob.IsLootable)
+                                LootableMobs.Add(mob);
+                        }
+                        foreach (var mob in aggroMobsAll)
+                        {
+                            if (FarmZone.ObjInZone(mob))
+                                aggroMobsInsideFarmZone.Add(mob);
+                        }
+                        foreach (var mob in mobs)
+                        {
+                            if (FarmCfg.MobIDs.ContainsKey(mob.Id) && mob.IsAlive
+                                && !aggroMobsAll.Exists(b => b == mob) && mob.TargetGuid == WowGuid.Zero
+                                &&
+                                (
+                                        (FarmCfg.PullRoundZone != null && FarmCfg.PullRoundZone.ObjInZone(mob))
+                                    || (FarmCfg.PullPolygoneZone != null && FarmCfg.PullPolygoneZone.ObjInZone(mob))
+                                    || (ClassCfg.PullSpellId != 0 && mob.Distance(Me) < PullSpellRange)
+                                )
+                                )
+                            {
+                                if (GetVar(mob, "los") == null)
+                                    mobsCanBePulled.Add(mob);
+                                else
+                                {
+                                    var dt = (DateTime)GetVar(mob, "los");
+                                    if (dt.AddSeconds(60) < DateTime.UtcNow)
+                                        mobsCanBePulled.Add(mob);
+                                }
+                            }
+                        }
+                        BestMob = GetBestMob();
                     }
-                    if (!mob.IsAlive && mob.Distance(Totem) < 15)
-                    {
-                        if (mob.IsLootable)
-                            LootableMobs.Add(mob);
-                    }
+
+                    var s = BestMob != null ? (BestMob.Name + "[" + Me.Distance(BestMob) + "]") : "null";
+                    //Console.WriteLine(State + "|" + MoveReason + "[" + MoveQueue.Count + "]" + "|" + s);
                 }
-            }
-            foreach (var mob in AggroMobsAll)
-            {
-                if (FarmZone.ObjInZone(mob))
-                    AggroMobsInsideFarmZone.Add(mob);
-            }
-            foreach (var mob in mobs)
-            {
-                if (FarmCfg.MobIDs.ContainsKey(mob.Id) && mob.IsAlive
-                    && !AggroMobsAll.Exists(b => b == mob) && mob.TargetGuid == WowGuid.Zero
-                    &&
-                    (
-                            (FarmCfg.PullRoundZone != null && FarmCfg.PullRoundZone.ObjInZone(mob))
-                        ||  (FarmCfg.PullPolygoneZone != null && FarmCfg.PullPolygoneZone.ObjInZone(mob))
-                        ||  (ClassCfg.PullSpellId != 0 && mob.Distance(Me) < PullSpellRange)
-                    )
-                    )
+                catch (Exception e)
                 {
-                    if (GetVar(mob, "los") == null)
-                        MobsCanBePulled.Add(mob);
-                    else
-                    {
-                        var dt = (DateTime)GetVar(mob, "los");
-                        if (dt.AddSeconds(60) < DateTime.UtcNow)
-                            MobsCanBePulled.Add(mob);
-                    }
+                    Console.WriteLine(e);
                 }
             }
-            BestMob = GetBestMob();
         }
         bool HealParty()
         {
@@ -919,10 +1198,9 @@ namespace PartyFarm
                         {
                             var spellCastRange = Math.Max(0, GetSpellCastRange(spellData.Id) - 1);
                             if (spellCastRange != 0 && spellCastRange < Me.Distance(p))
-                            {
                                 ComeToAndWaitStop(p, Math.Max(0.5f, spellCastRange - 2), EMoveReason.PartyHeal);
-                            }
-                            if (UseSingleSpell(spellData.Id, !spellInstant, p))
+                            var cr = UseSingleSpell(spellData.Id, !spellInstant, p);
+                            if (cr == ESpellCastError.SUCCESS)
                                 return true;
                         }
                     }
@@ -937,7 +1215,7 @@ namespace PartyFarm
                 var spellInstant = IsSpellInstant(spellData.Id);
                 if (CheckAllConditions(spellData, Me))
                 {
-                    if (UseSingleSpell(spellData.Id, !spellInstant, Me))
+                    if (UseSingleSpell(spellData.Id, !spellInstant, Me) == ESpellCastError.SUCCESS)
                         return true;
                 }
             }
@@ -950,7 +1228,7 @@ namespace PartyFarm
                 var spellInstant = IsSpellInstant(spellData.Id);
                 if (CheckAllConditions(spellData, Me))
                 {
-                    if (UseSingleSpell(spellData.Id, !spellInstant, Me))
+                    if (UseSingleSpell(spellData.Id, !spellInstant, Me) == ESpellCastError.SUCCESS)
                         return true;
                 }
             }
@@ -958,7 +1236,7 @@ namespace PartyFarm
         }
         bool UseTaunt()
         {
-            if (ClassCfg.TauntSpellId != 0 && AggroMobsOnParty.Count > 0)
+            if (ClassCfg.TauntSpellId != 0 && GetAggroMobsOnPartyCount() > 0)
             {
                 var mob = GetBestMobForTaunt();
                 if (mob == null)
@@ -972,8 +1250,62 @@ namespace PartyFarm
                 {
                     CancelMovesAndWaitStop();
                 }
-                if (UseSingleSpell(ClassCfg.TauntSpellId, !spellInstant, mob))
+                if (UseSingleSpell(ClassCfg.TauntSpellId, !spellInstant, mob) == ESpellCastError.SUCCESS)
                     return true;
+            }
+            return false;
+        }
+       
+        bool CheckNeedResAnothers()
+        {
+            if (ClassCfg.ResSpellIds.Count > 0)
+            {
+                if (NextSpellResTry < DateTime.UtcNow)
+                {
+                    NextSpellResTry = DateTime.UtcNow.AddSeconds(RandomGen.Next(10, 30));
+                    var corpses = GetEntities<Corpse>();
+                    foreach (var p in Group.GetMembers())
+                    {
+                        Entity deadMember = null;
+                        var player = GetEntity(p.Guid) as Player;
+                        if (player != null && !player.IsAlive)
+                            deadMember = player;
+                        if (deadMember == null)
+                        {
+                            foreach (var c in corpses)
+                            {
+                                if (c.OwnerGuid == p.Guid && (c.CorpseType == ECorpseType.ResurrectablePVE || c.CorpseType == ECorpseType.ResurrectablePVP))
+                                {
+                                    deadMember = c;
+                                    break;
+                                }
+                            }
+                        }
+
+                        if (deadMember != null)
+                        {
+                            foreach (var spell in ClassCfg.ResSpellIds)
+                            {
+                                var spellInstant = IsSpellInstant(spell.Id);
+                                var spellCastRange = Math.Max(0, GetSpellCastRange(spell.Id) - 1);
+                                if (spellCastRange != 0 && spellCastRange < Me.Distance(deadMember))
+                                    ComeToAndWaitStop(deadMember, Math.Max(0.5f, spellCastRange - 2), EMoveReason.ComeToResPlayer);
+                                if (!spellInstant && (Me.IsMoving || MoveQueue.Count > 0))
+                                    CancelMovesAndWaitStop();
+                                var cr = UseSingleSpell(spell.Id, !spellInstant, deadMember);
+                                if (cr == ESpellCastError.LINE_OF_SIGHT)
+                                {
+                                    ComeToAndWaitStop(deadMember, 3, EMoveReason.ComeToResPlayer);
+                                    if (!spellInstant && (Me.IsMoving || MoveQueue.Count > 0))
+                                        CancelMovesAndWaitStop();
+                                    cr = UseSingleSpell(spell.Id, !spellInstant, deadMember);
+                                }
+                                if (cr == ESpellCastError.SUCCESS)
+                                    return true;
+                            }
+                        }
+                    }
+                }
             }
             return false;
         }
@@ -998,20 +1330,12 @@ namespace PartyFarm
                 var spellInstant = IsSpellInstant(ClassCfg.TotemSpellId);
                 var spellCastRange = Math.Max(0, GetSpellCastRange(ClassCfg.TotemSpellId) - 1);
                 var randPoint2D = FarmCfg.TotemInstallZone.GetRandomPoint();
-                var castPoint = new Vector3F(randPoint2D.X, randPoint2D.Y, GetNavMeshHeight(randPoint2D.X, randPoint2D.Y));
-                Log("Put totem at " + castPoint, Me.Name);
+                var castPoint = new Vector3F(randPoint2D.X, randPoint2D.Y, GetNavMeshHeight(new Vector3F(randPoint2D.X, randPoint2D.Y,0)));
                 if (spellCastRange != 0 && spellCastRange < Me.Distance(castPoint))
-                {
-                    Log("Come for this", Me.Name);
                     ComeToAndWaitStop(castPoint, Math.Max(0.5f, spellCastRange - 2), EMoveReason.UseTotem);
-                }
                 if (!spellInstant && (Me.IsMoving || MoveQueue.Count > 0))
-                {
-                    Log("Stop movements", Me.Name);
                     CancelMovesAndWaitStop();
-                }
                 var result = SpellManager.CastSpell(ClassCfg.TotemSpellId, null, castPoint);
-                Log("result = " + result, Me.Name);
                 return result == ESpellCastError.SUCCESS;
             }
             return false;
@@ -1059,12 +1383,16 @@ namespace PartyFarm
         }
         bool CanContinuePull()
         {
-            if (MobsCanBePulled.Count == 0)
+            if ((State & EFarmState.Farming) == 0)
+                return false;
+            if ((State & EFarmState.DontPull) != 0)
+                return false;
+            if (GetMobsCanBePulledCount() == 0)
                 return false;
             if (Me.HpPercents < 70)
                 return false;
             //увеличить при необходимости
-            if ((AggroMobsAll.Count - AggroMobsOnMe.Count) > FarmCfg.DontPullWhenXMobsInFarmZone)
+            if ((GetAggroMobsAllCount() - GetAggroMobsOnMeCount()) > FarmCfg.DontPullWhenXMobsInFarmZone)
                 return false;
             var d = Me.Distance2D(new Vector3F(FarmZone.X, FarmZone.Y, 0));
             uint r = 0;
@@ -1101,6 +1429,12 @@ namespace PartyFarm
         }
         bool CheckDistToFarmZone()
         {
+            if (Me.Distance2D(new Vector3F(FarmZone.X, FarmZone.Y, 0)) > 120)
+            {
+                ComeToAndWaitStop(FarmCfg.StartFarmPoint, 2, EMoveReason.ComeToFarmStartPoint);
+                return true;
+            }
+
             bool forceBack = false;
             if (IsPuller && !CanContinuePull() && Me.Distance2D(new Vector3F(FarmZone.X, FarmZone.Y, 0)) > FarmZone.Radius)
                 forceBack = true;
@@ -1115,7 +1449,7 @@ namespace PartyFarm
 
             if (Me.Distance2D(new Vector3F(FarmZone.X, FarmZone.Y, 0)) > dist)
             {
-                var posToCome = new Vector3F(FarmZone.X, FarmZone.Y, GetNavMeshHeight(FarmZone.X, FarmZone.Y));
+                var posToCome = new Vector3F(FarmZone.X, FarmZone.Y, GetNavMeshHeight(new Vector3F(FarmZone.X, FarmZone.Y, 0)));
                 ComeToAndWaitStop(posToCome, Math.Max(0.5f, dist - RandomGen.Next(2, 5)), EMoveReason.BackToFarmZone);
                 return true;
             }
@@ -1125,7 +1459,7 @@ namespace PartyFarm
         {
             Unit result = null;
             double dist = double.MaxValue;
-            foreach (var mob in MobsCanBePulled)
+            foreach (var mob in GetMobsCanBePulled())
             {
                 if (dist > Me.Distance(mob))
                 {
@@ -1139,7 +1473,7 @@ namespace PartyFarm
         {
             Unit result = null;
             double dist = double.MaxValue;
-            foreach (var mob in AggroMobsOnParty)
+            foreach (var mob in GetAggroMobsOnParty())
             {
                 if (dist > Me.Distance(mob))
                 {
@@ -1156,7 +1490,7 @@ namespace PartyFarm
             BestMobInsideFZ = false;
             double dist = double.MaxValue;
             uint prio = 0; //чем выше - тем выше приоритет
-            foreach (var mob in AggroMobsInsideFarmZone)
+            foreach (var mob in GetAggroMobsInsideFarmZone())
             {
                 uint mobPrio = 0;
                 if (FarmCfg.MobIDs.ContainsKey(mob.Id))
@@ -1180,7 +1514,7 @@ namespace PartyFarm
             }
             if (result == null)
             {
-                foreach (var mob in AggroMobsAll)
+                foreach (var mob in GetAggroMobsAll())
                 {
                     uint mobPrio = 0;
                     if (FarmCfg.MobIDs.ContainsKey(mob.Id))
@@ -1207,7 +1541,7 @@ namespace PartyFarm
         }
         bool PullMobs()
         {
-            if (ClassCfg.PullSpellId != 0 && MobsCanBePulled.Count > 0)
+            if (ClassCfg.PullSpellId != 0 && GetMobsCanBePulledCount() > 0)
             {
                 if (!CanContinuePull())
                     return false;
@@ -1220,7 +1554,7 @@ namespace PartyFarm
                     ComeToAndWaitStop(mob, Math.Max(0.5f, spellCastRange - 2), EMoveReason.ComeToMobForPull);
                 if (!spellInstant && (Me.IsMoving || MoveQueue.Count > 0))
                     CancelMovesAndWaitStop();
-                if (UseSingleSpell(ClassCfg.PullSpellId, !spellInstant, mob))
+                if (UseSingleSpell(ClassCfg.PullSpellId, !spellInstant, mob) == ESpellCastError.SUCCESS)
                     return true;
             }
             return false;
@@ -1239,20 +1573,23 @@ namespace PartyFarm
                 var spellCastRange = Math.Max(0, GetSpellCastRange(spell.Id) - 1);
                 if (spellCastRange != 0 && spellCastRange < Me.Distance(BestMob))
                 {
-                    if (!FarmCfg.ProtectPullers && !BestMobInsideFZ)
-                        continue;
+                    if ((State & EFarmState.Farming) != 0)
+                    {
+                        if (!FarmCfg.ProtectPullers && !BestMobInsideFZ)
+                            continue;
+                    }
                     ComeToAndWaitStop(BestMob, Math.Max(0.5f, spellCastRange - 2), EMoveReason.ComeToMobForAttack);
                 }
 
                 bool spellCanMoveWhileCasting = false;
                 //пока так, потом надо функцию в АПИ
                 if (spell.Id == 120360 || spell.Id == 257044 || spell.Id == 56641)
-                {
                     spellCanMoveWhileCasting = true;
-                }
                 if (spellCastRange == 0 || (spellCastRange != 0 && spellCastRange >= Me.Distance(BestMob)))
-                    if (UseSingleSpell(spell.Id, !spellInstant && !spellCanMoveWhileCasting, BestMob, spell.SendLocation ? BestMob.Location : new Vector3F()))
+                {
+                    if (UseSingleSpell(spell.Id, !spellInstant && !spellCanMoveWhileCasting, BestMob, spell.SendLocation ? BestMob.Location : new Vector3F()) == ESpellCastError.SUCCESS)
                         return true;
+                }
             }
             return false;
         }
@@ -1270,8 +1607,9 @@ namespace PartyFarm
             while (SpellManager.IsCasting || SpellManager.IsChanneling)
                 Thread.Sleep(100);
         }
-        bool UseSingleSpell(uint id, bool waitCasts, Unit target = null, Vector3F pos = new Vector3F(), bool autoTurn = true)
+        ESpellCastError UseSingleSpell(uint id, bool waitCasts, Entity target = null, Vector3F pos = new Vector3F(), bool autoTurn = true)
         {
+            CancelMounts();
             if (waitCasts && (Me.IsMoving || MoveQueue.Count > 0))
                 CancelMovesAndWaitStop();
             if (target != null && target != Me && Me.Target != target)
@@ -1291,9 +1629,9 @@ namespace PartyFarm
             {
                 if (waitCasts)
                     WaitCasts();
-                return true;
+                return cr;
             }
-            return false;
+            return cr;
         }
         List<uint> MobsCastersNeedPreventCast = new List<uint>() { 122240 };
         Unit GetBestMobForSpellcastPreventing()
@@ -1301,12 +1639,12 @@ namespace PartyFarm
             //статически пропишу айди кастеров которых повстречаю
             Unit result = null;
             double dist = 0;
-            foreach (var mob in AggroMobsAll)
+            foreach (var mob in GetAggroMobsAll())
             {
                 if (!MobsCastersNeedPreventCast.Contains(mob.Id))
                     continue;
                 var d = Me.Distance(mob);
-                if (d < 10 || mob.Distance2D(new Vector3F(FarmZone.X, FarmZone.Y, 0)) > 45)
+                if (mob.IsMoving || d < 10 || mob.Distance2D(new Vector3F(FarmZone.X, FarmZone.Y, 0)) > 35)
                     continue;
                 if (d > dist)
                 {
@@ -1331,7 +1669,7 @@ namespace PartyFarm
                     ComeToAndWaitStop(mob, Math.Max(0.5f, spellCastRange - 2), EMoveReason.ComeToMobForAttack);
                 if (!spellInstant && (Me.IsMoving || MoveQueue.Count > 0))
                     CancelMovesAndWaitStop();
-                if (UseSingleSpell(ClassCfg.SpellcastPreventSpellId, !spellInstant, BestMob, new Vector3F(), false))
+                if (UseSingleSpell(ClassCfg.SpellcastPreventSpellId, !spellInstant, BestMob, new Vector3F(), false) == ESpellCastError.SUCCESS)
                     return true;
             }
             return false;

@@ -29,9 +29,11 @@ namespace PartyFarm.ClassConfigs
             PartyHealSpellIds.Add(new SpellCastData(8936)
             {
                 Conditions = new List<ConditionData> {
-                    new ConditionData(EValueType.HpPercent, 50, EComparsion.LessOrEqual)
+                    new ConditionData(EValueType.HpPercent, 60, EComparsion.LessOrEqual)
                 }
             });
+
+            ResSpellIds.Add(new SpellCastData(20484));
 
             //Warrior of elune
             BuffSpellIds.Add(new SpellCastData(202425));

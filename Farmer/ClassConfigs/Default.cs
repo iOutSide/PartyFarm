@@ -71,6 +71,7 @@ namespace PartyFarm.ClassConfigs
         public uint PullSpellId;
         public uint TauntSpellId;
         public uint TotemSpellId;
+        public List<SpellCastData> ResSpellIds = new List<SpellCastData>(); //только которые можно юзать в бою!
         public uint SpellcastPreventSpellId;
         public List<SpellCastData> SelfHealSpellIds = new List<SpellCastData>();
         public List<SpellCastData> PartyHealSpellIds = new List<SpellCastData>();

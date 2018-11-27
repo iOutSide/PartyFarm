@@ -33,5 +33,8 @@ namespace PartyFarm.FarmConfig
         public int DontPullWhenXMobsInFarmZone = 3;
         public Vector3F RepairSummonPoint;
         public uint RepairmanMountSpellId;
+        public Vector3F SafeRegroupPoint;
+        public Vector3F StartFarmPoint;
+        public uint FarmMapId;
     }
 }

@@ -17,7 +17,7 @@
     <DebugSymbols>true</DebugSymbols>
     <DebugType>full</DebugType>
     <Optimize>false</Optimize>
-    <OutputPath>D:\Games\WoW\Debug\Plugins\Farm\</OutputPath>
+    <OutputPath>D:\Games\WoW\TestRelease\Plugins\Farm\</OutputPath>
     <DefineConstants>DEBUG;TRACE</DefineConstants>
     <ErrorReport>prompt</ErrorReport>
     <WarningLevel>4</WarningLevel>
@@ -41,6 +41,10 @@
     </Reference>
     <Reference Include="Out.Internal">
       <HintPath>D:\Games\ArcheAge\Release\Out.Internal.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="Out.Navigation">
+      <HintPath>Dependencies\Out.Navigation.dll</HintPath>
       <Private>False</Private>
     </Reference>
     <Reference Include="Out.Utility">

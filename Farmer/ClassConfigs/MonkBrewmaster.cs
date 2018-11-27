@@ -25,6 +25,14 @@ namespace PartyFarm.ClassConfigs
                 }
             });
 
+            //Vivify
+            SelfHealSpellIds.Add(new SpellCastData(116670)
+            {
+                Conditions = new List<ConditionData> {
+                    new ConditionData(EValueType.HpPercent, 50, EComparsion.LessOrEqual)
+                }
+            });
+
             //Очищающий отвар
             BuffSpellIds.Add(new SpellCastData(119582)
             {
